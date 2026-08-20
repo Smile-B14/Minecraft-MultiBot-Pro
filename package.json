@@ -1,0 +1,24 @@
+{
+  "name": "minecraft-multibot-pro",
+  "version": "1.3.0",
+  "private": true,
+  "description": "Cross-platform Mineflayer multi-bot controller with SRV port lookup, version auto-detection, auto-auth, movement AI, and reconnect controls.",
+  "main": "bot.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node bot.js",
+    "check": "node --check bot.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "mineflayer": "4.37.1",
+    "mineflayer-pathfinder": "2.4.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Smile-B14/Minecraft-MultiBot-Pro.git"
+  },
+  "license": "MIT"
+}
