@@ -9,7 +9,7 @@ const {
 } = require('mineflayer-pathfinder')
 
 const CFG = {
-  maxBots: 30,
+  maxBots: 10000,
   joinGap: 6500,
   retry: 10000,
   throttleRetry: 12000,
