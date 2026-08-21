@@ -4,6 +4,12 @@ Cross-platform Minecraft Java multi-bot controller built with Mineflayer. Runs i
 
 > Use only on servers you own or have permission to test. The controller keeps a global connection gap, respects server bans, and does not bypass active server protections.
 
+## Hardened branch
+
+This branch is `hardened-safe-v3`. It keeps the normal multi-bot controls and documents the audit findings in [`HARDENED.md`](HARDENED.md).
+
+The reviewed build intentionally does not add rotating public proxies to evade server IP throttles/bans, infinite join flooding, chat-spam automation, or anti-cheat bypass logic.
+
 ## Features
 
 - Up to 30 offline/cracked-mode bot usernames
@@ -34,16 +40,25 @@ Dependencies are pinned in `package.json`:
 
 ## Termux / Android
 
-Install Node.js and Git once:
+Fresh install:
 
 ```bash
-pkg update -y && pkg install git nodejs-lts -y
+pkg update -y
+pkg install git nodejs-lts -y
+git clone -b hardened-safe-v3 https://github.com/Smile-B14/Minecraft-MultiBot-Pro.git
+cd Minecraft-MultiBot-Pro
+npm install
+npm start
 ```
 
-Clone, install, and run:
+If you already cloned the repository:
 
 ```bash
-git clone https://github.com/Smile-B14/Minecraft-MultiBot-Pro.git && cd Minecraft-MultiBot-Pro && npm install && npm start
+cd ~/Minecraft-MultiBot-Pro
+git fetch origin
+git switch hardened-safe-v3
+npm install
+npm start
 ```
 
 Later runs:
@@ -52,12 +67,21 @@ Later runs:
 cd ~/Minecraft-MultiBot-Pro && npm start
 ```
 
+Update later:
+
+```bash
+cd ~/Minecraft-MultiBot-Pro
+git pull
+npm install
+npm start
+```
+
 ## Windows / macOS / Linux
 
 Install Node.js 22+ and Git, then:
 
 ```bash
-git clone https://github.com/Smile-B14/Minecraft-MultiBot-Pro.git
+git clone -b hardened-safe-v3 https://github.com/Smile-B14/Minecraft-MultiBot-Pro.git
 cd Minecraft-MultiBot-Pro
 npm install
 npm start
@@ -77,13 +101,13 @@ Minutes to stay (0 = until quit):
 
 ### Port
 
-Leave the port blank for a normal Java hostname that provides an SRV record. The script omits `port` from the Mineflayer connection options so the underlying Minecraft protocol stack can perform Java-style service lookup.
+Leave the port blank for a normal Java hostname that provides an SRV record. The script omits `port` from the Mineflayer connection options so the underlying Minecraft protocol stack can use normal Java-style lookup behavior.
 
 If you use a raw IP address or a hostname without an SRV record and the server uses a nonstandard port, enter the port manually.
 
 ### Version
 
-Leave version blank or enter `auto` for automatic detection. You can also force a version such as `1.21.11`.
+Leave version blank or enter `auto` for automatic detection. You can also force a supported version such as `1.21.11`.
 
 ## Auto register / login
 
@@ -158,8 +182,12 @@ quit
 npm run check
 ```
 
-## Notes
+## Review notes
 
-- The default connection gap is 6.5 seconds to avoid hammering the same server.
-- Auto version mode is recommended unless a server/proxy requires a specific protocol version.
-- Movement/pathfinding behavior depends on server terrain and protocol support.
+- Mineflayer 4.37.1 currently requires Node.js 22+.
+- Passing an HTTP `agent` is not the same as proxying the raw Minecraft TCP connection.
+- Blank `port` and `version` are intentionally omitted rather than passed as `null`.
+- Auth detection uses a short post-spawn window and cooldown to avoid loops.
+- The global scheduler and connection gap are retained instead of bypassing server throttling.
+
+See [`HARDENED.md`](HARDENED.md) for the full audit summary.
