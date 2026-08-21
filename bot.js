@@ -7,14 +7,14 @@ const { SocksProxyAgent } = require('socks-proxy-agent')
 const https = require('https')
 
 const CFG = {
-  // Randomized join delay between 3.8s and 5.6s to bypass anti-cheat join limits
   minJoinGap: 3800,
   maxJoinGap: 5600,
   followRadius: 40,
   followDistance: 2,
   hitDistance: 3.5,
-  aiTick: 400, // Fast reaction time for PvP
-  authPassword: '12345'
+  aiTick: 400,
+  authPassword: '12345',
+  chatDelay: 1500 // 1.5 seconds delay between each bot chatting to bypass spam filters
 }
 
 const rl = readline.createInterface({
@@ -41,7 +41,6 @@ let targetHost = ''
 let targetPort = null
 let targetVersion = null
 
-// Proxy Memory Management
 const proxyPool = []
 const deadProxiesGlobal = new Set()
 const usedProxiesForServer = new Map()
@@ -51,13 +50,8 @@ const ask = q => new Promise(resolve => rl.question(q, resolve))
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const text = v => typeof v === 'string' ? v : JSON.stringify(v)
 
-// Global crash preventers
-process.on('uncaughtException', (err) => {
-  log(`CRASH PREVENTED (Uncaught): ${err.message}`)
-})
-process.on('unhandledRejection', (err) => {
-  log(`CRASH PREVENTED (Rejection): ${err}`)
-})
+process.on('uncaughtException', (err) => log(`CRASH PREVENTED (Uncaught): ${err.message}`))
+process.on('unhandledRejection', (err) => log(`CRASH PREVENTED (Rejection): ${err}`))
 
 async function askValid(question, validator) {
   while (true) {
@@ -100,7 +94,6 @@ function getProxyForServer(serverHost) {
     if (anyAlive.length > 0) return anyAlive[Math.floor(Math.random() * anyAlive.length)]
     return null
   }
-  
   const proxy = available[Math.floor(Math.random() * available.length)]
   used.add(proxy.proxyUrl)
   usedProxiesForServer.set(serverHost, used)
@@ -120,20 +113,16 @@ function generateRealisticName() {
   const prefixes = ['xX', 'Itz', 'Pro', 'The', 'i', '_', 'Mr', 'Lil', 'xX_', 'The_']
   const names = ['Steve', 'Alex', 'Pixel', 'Block', 'Craft', 'Mine', 'Epic', 'God', 'Dark', 'Shadow', 'Cool', 'Smart', 'Sniper', 'Gamer', 'Noob', 'King', 'Boss', 'PvP', 'Slayer', 'Zombie', 'Creeper']
   const suffixes = ['Xx', '_Xx', 'YT', '99', '123', '_', 'Pro', 'GG', '420', '69', '777', 'x', '_']
-  
   let name = ''
   const r = Math.random()
-  
   if (r < 0.25) name = `xX${names[Math.floor(Math.random()*names.length)]}Xx`
   else if (r < 0.5) name = `${names[Math.floor(Math.random()*names.length)]}_${Math.floor(Math.random() * 9999)}`
   else if (r < 0.75) name = `${names[Math.floor(Math.random()*names.length)]}${suffixes[Math.floor(Math.random()*suffixes.length)]}`
   else name = `${prefixes[Math.floor(Math.random()*prefixes.length)]}${names[Math.floor(Math.random()*names.length)]}`
-  
   if (Math.random() < 0.4 && name.length < 13) name += Math.floor(Math.random() * 999)
   name = name.replace(/[^A-Za-z0-9_]/g, '')
   if (name.length < 4) name += Math.floor(Math.random() * 9999)
   if (name.length > 16) name = name.substring(0, 16)
-  
   return name
 }
 
@@ -169,18 +158,13 @@ function runQueue() {
 
   const ready = queue.filter(x => x.readyAt <= now)
   if (!ready.length) return scheduleQueue()
-  
   const entry = ready[0]
   queue.splice(queue.indexOf(entry), 1)
   entry.state.queued = false
-  
-  // Randomized join delay between 3.8s and 5.6s
   const joinDelay = CFG.minJoinGap + Math.random() * (CFG.maxJoinGap - CFG.minJoinGap)
   nextConnectAt = Date.now() + joinDelay
-  
-  try {
-    connectBot(entry.state)
-  } catch (e) {
+  try { connectBot(entry.state) } 
+  catch (e) {
     log(`Queue error: ${e.message}. Retrying...`)
     entry.state.proxy = getProxyForServer(targetHost)
     enqueue(entry.state, 3000, 'queue error retry')
@@ -189,9 +173,8 @@ function runQueue() {
 }
 
 function nearestHuman(bot) {
-  try {
-    return bot.nearestEntity(e => e.type === 'player' && e.username && e.username !== bot.username && !botNames.has(e.username.toLowerCase()))
-  } catch { return null }
+  try { return bot.nearestEntity(e => e.type === 'player' && e.username && e.username !== bot.username && !botNames.has(e.username.toLowerCase())) } 
+  catch { return null }
 }
 
 function startAI(state) {
@@ -199,28 +182,22 @@ function startAI(state) {
     if (state.aiTimer) clearInterval(state.aiTimer)
     const bot = state.bot
     if (!bot?.entity) return
-    
     const movements = new Movements(bot)
     movements.canDig = false
     movements.allow1by1towers = false
     movements.maxDropDown = 3
     bot.pathfinder.setMovements(movements)
-  } catch (e) {
-    log(`[${state.username}] AI setup error: ${e.message}`)
-  }
+  } catch (e) { log(`[${state.username}] AI setup error: ${e.message}`) }
 
   state.aiTimer = setInterval(async () => {
     try {
       if (!aiEnabled || !state.connected || !state.bot?.entity) return
-      
       const bot = state.bot
       const target = nearestHuman(bot)
-      
       if (target) {
         const d = bot.entity.position.distanceTo(target.position)
         if (d <= CFG.followRadius) {
           try { bot.pathfinder.setGoal(new GoalFollow(target, CFG.followDistance), true) } catch {}
-          
           if (hitEnabled && d <= CFG.hitDistance && Date.now() - state.lastHit > (400 + Math.random() * 400)) {
             state.lastHit = Date.now()
             const offsetX = (Math.random() - 0.5) * 0.5
@@ -233,7 +210,6 @@ function startAI(state) {
           return
         }
       } else {
-        // Anti-AFK: If no player is around, wander randomly and jump
         if (!bot.pathfinder.isMoving() && Math.random() < 0.3) {
           const x = bot.entity.position.x + (Math.random() * 20 - 10)
           const z = bot.entity.position.z + (Math.random() * 20 - 10)
@@ -243,9 +219,7 @@ function startAI(state) {
           try { bot.setControlState('jump', true); setTimeout(() => bot.setControlState('jump', false), 300) } catch {}
         }
       }
-    } catch (e) {
-      // Silently ignore AI tick errors
-    }
+    } catch (e) {}
   }, CFG.aiTick)
 }
 
@@ -254,7 +228,6 @@ function handleAuth(state, raw) {
     if (!state.connected) return
     const msg = String(raw || '').trim().toLowerCase()
     if (!msg) return
-
     if (msg.includes('/register') || msg.includes('please register')) {
       try { state.bot.chat(`/register ${CFG.authPassword} ${CFG.authPassword}`) } catch {}
     } else if (msg.includes('/login') || msg.includes('please login')) {
@@ -265,15 +238,10 @@ function handleAuth(state, raw) {
 
 function connectBot(state) {
   state.connecting = true
-  
   const proxyTag = state.proxy ? `[P]` : `[D]`
   log(`[${state.username}] ${proxyTag} Connecting to ${targetHost}...`)
 
-  const opts = { 
-    host: targetHost, username: state.username, auth: 'offline', 
-    keepAlive: true, hideErrors: true, port: targetPort, version: targetVersion
-  }
-
+  const opts = { host: targetHost, username: state.username, auth: 'offline', keepAlive: true, hideErrors: true, port: targetPort, version: targetVersion }
   if (state.proxy) {
     try { opts.agent = new SocksProxyAgent(state.proxy.proxyUrl) } 
     catch (e) {
@@ -311,7 +279,6 @@ function connectBot(state) {
   bot.on('kicked', reason => {
     const reasonStr = text(reason).toLowerCase()
     log(`[${state.username}] KICKED: ${text(reason)}`)
-    
     if (reasonStr.includes('whitelist') || reasonStr.includes('not whitelisted') || reasonStr.includes('banned')) {
       log(`[${state.username}] Stopping retries (Whitelist/Ban detected).`)
       state.permanentStop = true
@@ -333,7 +300,6 @@ function connectBot(state) {
     state.connected = false
     state.connecting = false
     state.bot = null
-    
     if (!state.permanentStop) {
       state.proxy = getProxyForServer(targetHost)
       enqueue(state, 3000, 'retry')
@@ -347,15 +313,15 @@ function connectBot(state) {
 async function sendAll(message) {
   const online = [...states.values()].filter(s => s.connected && s.bot)
   for (const s of online) {
-    try { s.bot.chat(message); await sleep(300) } catch {}
+    try { s.bot.chat(message); await sleep(CFG.chatDelay) } catch {} // 1.5s delay between each bot
   }
-  log(`Sent message to ${online.length} bots.`)
+  log(`Finished sending message to ${online.length} bots.`)
 }
 
 function startSpam(message, interval) {
   if (spamTimer) clearInterval(spamTimer)
   spamTimer = setInterval(() => sendAll(message), interval)
-  log(`Spamming every ${interval}ms.`)
+  log(`Spamming EVERY ${interval}ms. (Each bot will wait ${CFG.chatDelay}ms before chatting to bypass limits)`)
 }
 
 function stopSpam() {
@@ -366,8 +332,6 @@ function startInfiniteSpawn() {
   if (infiniteSpawn) return
   infiniteSpawn = true
   log('Infinite spawn mode enabled. Generating bots continuously...')
-  
-  // Generate a bot every 1.5s to keep the queue fed, but the actual join delay is 3.8-5.6s
   spawnInterval = setInterval(() => {
     try {
       const name = generateRealisticName()
@@ -399,14 +363,15 @@ function showBots() {
 function help() {
   log(`
 === BOT CONTROL (CMD ONLY) ===
-list
-spam <interval_ms> <message>
-stopspam
-stopspawn
-ai on | ai off
-hit on | hit off
-logs on | logs off
-quit
+list                      -> Shows how many bots are online/connecting
+spam <ms> <message>       -> Bots spam chat. Example: spam 5000 Hello!
+                            (5000 = wait 5 seconds between spam waves)
+stopspam                  -> Stops the chat spam
+stopspawn                 -> Stops infinite bot generation
+ai on | ai off            -> Toggles following and wandering
+hit on | hit off          -> Toggles attacking players
+logs on | logs off        -> Toggles server chat logging in console
+quit                      -> Disconnects all bots and exits
 ==============================`)
 }
 
@@ -424,8 +389,12 @@ function startControls() {
       if (cmd === 'list') showBots()
       else if (cmd === 'spam') {
         const p = rest.indexOf(' ')
-        if (p < 0) log('Use: spam <interval_ms> <message>')
-        else startSpam(rest.slice(p + 1).trim(), parseInt(rest.slice(0, p)))
+        if (p < 0) log('Use: spam <interval_ms> <message> (Example: spam 5000 Hello)')
+        else {
+          const interval = parseInt(rest.slice(0, p))
+          if (isNaN(interval) || interval < 1000) log('Interval must be a number >= 1000. Example: spam 5000 Hello')
+          else startSpam(rest.slice(p + 1).trim(), interval)
+        }
       }
       else if (cmd === 'stopspam') stopSpam()
       else if (cmd === 'stopspawn') stopSpawn()
@@ -445,14 +414,12 @@ function startControls() {
 }
 
 async function main() {
-  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v5.1 ===\n')
-  
+  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v5.2 ===\n')
   const fetched = await fetchProxies()
   proxyPool.push(...fetched)
   console.log(`Auto-loaded ${proxyPool.length} SOCKS5 proxies.`)
 
   targetHost = await askValid('Target Server IP: ', (v) => v.length > 2 ? true : 'IP must be at least 3 characters.')
-  
   const portText = await askValid('Port (blank = auto): ', (v) => {
     if (!v) return true
     const p = Number(v)
@@ -460,7 +427,6 @@ async function main() {
     return true
   })
   if (portText) targetPort = Number(portText)
-
   const versionText = await askValid('Version (blank = auto): ', (v) => true)
   if (versionText && versionText.toLowerCase() !== 'auto') targetVersion = versionText
 
@@ -471,9 +437,8 @@ async function main() {
   })
   
   const count = parseInt(countText || '0')
-  if (count === 0) {
-    startInfiniteSpawn()
-  } else {
+  if (count === 0) startInfiniteSpawn()
+  else {
     for (let i = 0; i < count; i++) {
       const name = generateRealisticName()
       botNames.add(name.toLowerCase())
@@ -485,7 +450,7 @@ async function main() {
 
   console.log(`\nTarget: ${targetHost}${targetPort ? ':' + targetPort : ''}`)
   console.log(`Join Delay: ${CFG.minJoinGap/1000}s - ${CFG.maxJoinGap/1000}s (Randomized)`)
-  console.log(`Starting swarm. Proxies are auto-rotating.\n`)
+  console.log(`Type 'help' in the console to see commands.\n`)
   startControls()
 }
 
