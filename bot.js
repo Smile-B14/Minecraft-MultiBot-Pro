@@ -2,25 +2,17 @@
 
 const mineflayer = require('mineflayer')
 const readline = require('readline')
-const {
-  pathfinder,
-  Movements,
-  goals: { GoalFollow, GoalNearXZ }
-} = require('mineflayer-pathfinder')
+const { pathfinder, Movements, goals: { GoalFollow } } = require('mineflayer-pathfinder')
+const { SocksProxyAgent } = require('socks-proxy-agent')
+const https = require('https')
 
 const CFG = {
-  maxBots: 10000,
-  joinGap: 6500,
-  retry: 10000,
-  throttleRetry: 12000,
-  authWindow: 30000,
-  authRetryGap: 2500,
-  followRadius: 18,
+  joinGap: 2000, // 2 seconds. Safe because we use different proxies.
+  followRadius: 40,
   followDistance: 2,
-  hitDistance: 3.1,
-  aiTick: 1400,
-  wanderMin: 4,
-  wanderMax: 10
+  hitDistance: 3.5,
+  aiTick: 1000,
+  authPassword: '12345'
 }
 
 const rl = readline.createInterface({
@@ -35,80 +27,88 @@ const queue = []
 let queueSeq = 0
 let queueTimer = null
 let nextConnectAt = 0
-let controlMode = false
-let promptVisible = false
-let shuttingDown = false
-let ipBanned = false
+
 let aiEnabled = true
 let hitEnabled = true
 let logsEnabled = false
-let autoAuthEnabled = true
-let authPassword = 'thematic'
+let spamTimer = null
+let infiniteSpawn = false
+let spawnInterval = null
+
+let targetHost = ''
+let targetPort = null
+let targetVersion = null
+let proxyList = []
+let proxyIndex = 0
 
 const ask = q => new Promise(resolve => rl.question(q, resolve))
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
-const text = v => {
-  if (typeof v === 'string') return v
-  try { return JSON.stringify(v) } catch { return String(v) }
+const text = v => typeof v === 'string' ? v : JSON.stringify(v)
+
+// --- Auto Proxy Fetcher ---
+async function fetchProxies() {
+  console.log('Fetching public SOCKS5 proxies...')
+  return new Promise((resolve) => {
+    https.get('https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all&ssl=all&anonymity=all', (res) => {
+      let data = ''
+      res.on('data', chunk => data += chunk)
+      res.on('end', () => {
+        const list = data.split('\r\n').filter(Boolean).map(p => {
+          const [host, port] = p.split(':')
+          return { type: 'socks5', host, port: parseInt(port), username: '', password: '' }
+        })
+        resolve(list)
+      })
+    }).on('error', () => resolve([]))
+  })
 }
-const versionLabel = v => v || 'auto'
-const normalizeVersion = v => {
-  v = String(v || '').trim()
-  return !v || v.toLowerCase() === 'auto' ? null : v
+
+function getNextProxy() {
+  if (!proxyList.length) return null
+  const proxy = proxyList[proxyIndex % proxyList.length]
+  proxyIndex++
+  return proxy
+}
+
+// --- Random Username Generator ---
+const nameParts = {
+  pre: ['xX', 'Pro', 'Itz', 'The', 'Real', 'Just', 'i', 'Snipe'],
+  mid: ['Steve', 'Alex', 'Pixel', 'Block', 'Craft', 'Mine', 'Epic', 'God', 'Dark', 'Shadow', 'Cool', 'Smart'],
+  suf: ['Xx', 'YT', '99', '123', '_', 'Pro', 'GG', '420', '69', '777']
+}
+function generateRealisticName() {
+  let name = ''
+  const pattern = Math.floor(Math.random() * 4)
+  if (pattern === 0) name = `${nameParts.pre[Math.floor(Math.random()*nameParts.pre.length)]}${nameParts.mid[Math.floor(Math.random()*nameParts.mid.length)]}`
+  else if (pattern === 1) name = `${nameParts.mid[Math.floor(Math.random()*nameParts.mid.length)]}${nameParts.suf[Math.floor(Math.random()*nameParts.suf.length)]}`
+  else if (pattern === 2) name = `${nameParts.mid[Math.floor(Math.random()*nameParts.mid.length)]}_${Math.floor(Math.random() * 999)}`
+  else name = `${nameParts.pre[Math.floor(Math.random()*nameParts.pre.length)]}${nameParts.mid[Math.floor(Math.random()*nameParts.mid.length)]}${nameParts.suf[Math.floor(Math.random()*nameParts.suf.length)]}`
+
+  name = name.replace(/[^A-Za-z0-9_]/g, '')
+  if (name.length < 4) name += Math.floor(Math.random() * 9999)
+  if (name.length > 16) name = name.substring(0, 16)
+  return name
 }
 
 function log(...parts) {
   const line = parts.map(text).join(' ')
-  if (!controlMode || !promptVisible || !process.stdout.isTTY) {
-    process.stdout.write(line + '\n')
-    return
-  }
   readline.clearLine(process.stdout, 0)
   readline.cursorTo(process.stdout, 0)
   process.stdout.write(line + '\n')
-  if (typeof rl._refreshLine === 'function') rl._refreshLine()
-  else rl.prompt(true)
-}
-
-function prompt() {
-  if (!controlMode || shuttingDown) return
-  promptVisible = true
-  rl.prompt()
-}
-
-function classifyKick(reason) {
-  const s = text(reason).toLowerCase()
-  if (s.includes('multiplayer.disconnect.ip_banned') || s.includes('ip banned') || s.includes('ip_banned')) return 'ip_banned'
-  if (s.includes('multiplayer.disconnect.banned') || s.includes('you are banned') || s.includes('banned from this server')) return 'player_banned'
-  if (s.includes('connection throttled') || s.includes('please wait before reconnecting')) return 'throttled'
-  return 'other'
-}
-
-function priority(reason) {
-  if (reason === 'manual rejoin' || reason === 'restart') return 0
-  if (reason === 'retry' || reason === 'connection throttle') return 1
-  return 2
-}
-
-function removeQueued(state) {
-  for (let i = queue.length - 1; i >= 0; i--) if (queue[i].state === state) queue.splice(i, 1)
-  state.queued = false
+  rl.prompt(true)
 }
 
 function enqueue(state, delay = 0, reason = 'retry') {
-  if (shuttingDown || ipBanned || state.intentionalStop || state.permanentStop || state.connected || state.connecting || state.queued) return false
   state.queued = true
   state.queueReason = reason
-  queue.push({ state, readyAt: Date.now() + Math.max(0, delay), p: priority(reason), seq: queueSeq++ })
-  log(`[${state.username}] queued (${reason})`)
+  queue.push({ state, readyAt: Date.now() + Math.max(0, delay), seq: queueSeq++ })
   scheduleQueue()
-  return true
 }
 
 function scheduleQueue() {
   if (queueTimer) clearTimeout(queueTimer)
   queueTimer = null
-  if (shuttingDown || ipBanned || !queue.length) return
+  if (!queue.length) return
   const now = Date.now()
   const earliest = Math.min(...queue.map(x => x.readyAt))
   queueTimer = setTimeout(runQueue, Math.max(0, Math.max(earliest, nextConnectAt) - now))
@@ -116,13 +116,13 @@ function scheduleQueue() {
 
 function runQueue() {
   queueTimer = null
-  if (shuttingDown || ipBanned || !queue.length) return
+  if (!queue.length) return
   const now = Date.now()
   if (now < nextConnectAt) return scheduleQueue()
 
-  const ready = queue.filter(x => x.readyAt <= now && !x.state.permanentStop && !x.state.intentionalStop)
+  const ready = queue.filter(x => x.readyAt <= now)
   if (!ready.length) return scheduleQueue()
-  ready.sort((a, b) => a.p - b.p || a.readyAt - b.readyAt || a.seq - b.seq)
+  
   const entry = ready[0]
   queue.splice(queue.indexOf(entry), 1)
   entry.state.queued = false
@@ -131,211 +131,83 @@ function runQueue() {
   scheduleQueue()
 }
 
-function stopAI(state) {
-  if (state.aiTimer) clearInterval(state.aiTimer)
-  state.aiTimer = null
-  try { state.bot?.pathfinder?.setGoal(null) } catch {}
-  try { state.bot?.clearControlStates() } catch {}
-  state.followingId = null
-}
-
-function markPlayerBanned(state) {
-  state.permanentStop = true
-  state.stopReason = 'player_banned'
-  state.connected = false
-  state.connecting = false
-  removeQueued(state)
-  stopAI(state)
-  log(`[${state.username}] PLAYER BANNED - retries stopped`)
-}
-
-function markIpBanned() {
-  if (ipBanned) return
-  ipBanned = true
-  if (queueTimer) clearTimeout(queueTimer)
-  queueTimer = null
-  log('IP BAN DETECTED. All automatic reconnects stopped.')
-  log('After server-side unban: resetban, then rejoin all')
-  for (const state of states.values()) {
-    removeQueued(state)
-    if (!state.connected) {
-      state.permanentStop = true
-      state.stopReason = 'ip_banned'
-    }
-  }
-}
-
-function resetban() {
-  ipBanned = false
-  let n = 0
-  for (const state of states.values()) {
-    if (state.stopReason === 'ip_banned') {
-      state.permanentStop = false
-      state.stopReason = null
-      state.lastKick = ''
-      state.lastError = ''
-      n++
-    }
-  }
-  nextConnectAt = Date.now()
-  log(`Cleared LOCAL IP-ban state for ${n} bot(s). This does not remove a server ban.`)
-}
-
-function resetplayer(name) {
-  const state = states.get(String(name).toLowerCase())
-  if (!state) return log(`Unknown bot: ${name}`)
-  if (state.stopReason !== 'player_banned') return log(`[${state.username}] is not marked player-banned.`)
-  state.permanentStop = false
-  state.stopReason = null
-  state.lastKick = ''
-  state.lastError = ''
-  log(`[${state.username}] LOCAL player-ban state cleared.`)
-}
-
-function resetall() {
-  ipBanned = false
-  let n = 0
-  for (const state of states.values()) {
-    if (state.stopReason === 'ip_banned' || state.stopReason === 'player_banned') {
-      state.permanentStop = false
-      state.stopReason = null
-      state.intentionalStop = false
-      state.lastKick = ''
-      state.lastError = ''
-      n++
-    }
-  }
-  nextConnectAt = Date.now()
-  log(`Cleared LOCAL ban state for ${n} bot(s). Active server bans are not bypassed.`)
-}
-
-function resetAuth(state) {
-  state.authUntil = Date.now() + CFG.authWindow
-  state.auth = { registerAttempts: 0, loginAttempts: 0, lastRegister: 0, lastLogin: 0 }
-}
-
-function systemLikeMessage(msg) {
-  // Ignore vanilla-style <player> chat. Plugin/system messages are still scanned.
-  return !/^\s*<[^>]+>\s*/.test(msg)
-}
-
-function loginPrompt(msg) {
-  return /\/login\b/i.test(msg) || /\blogin\b/i.test(msg) || /\blog\s+in\b/i.test(msg)
-}
-
-function registerPrompt(msg) {
-  return /\/register\b/i.test(msg) || /\bregister\b/i.test(msg) || /\bregistration\b/i.test(msg) || /\breg\b/i.test(msg)
-}
-
-function handleAuth(state, raw) {
-  if (!autoAuthEnabled || !state.connected || Date.now() > state.authUntil) return
-  const msg = String(raw || '').trim()
-  if (!msg || !systemLikeMessage(msg)) return
-  const now = Date.now()
-
-  if (registerPrompt(msg) && now - state.auth.lastRegister >= CFG.authRetryGap) {
-    state.auth.lastRegister = now
-    state.auth.registerAttempts++
-    const onePass = state.auth.registerAttempts > 1 || /\/register\s+<password>\s*$/i.test(msg)
-    const cmd = onePass ? `/register ${authPassword}` : `/register ${authPassword} ${authPassword}`
-    try { state.bot.chat(cmd); log(`[${state.username}] AUTO-AUTH → ${cmd.replaceAll(authPassword, '********')}`) } catch {}
-    return
-  }
-
-  if (loginPrompt(msg) && now - state.auth.lastLogin >= CFG.authRetryGap) {
-    state.auth.lastLogin = now
-    state.auth.loginAttempts++
-    const cmd = `/login ${authPassword}`
-    try { state.bot.chat(cmd); log(`[${state.username}] AUTO-AUTH → /login ********`) } catch {}
-  }
-}
-
 function nearestHuman(bot) {
   return bot.nearestEntity(e => e.type === 'player' && e.username && e.username !== bot.username && !botNames.has(e.username.toLowerCase()))
 }
 
-function wander(state) {
-  const bot = state.bot
-  if (!bot?.entity || !bot.pathfinder) return
-  const dist = CFG.wanderMin + Math.random() * (CFG.wanderMax - CFG.wanderMin)
-  const angle = Math.random() * Math.PI * 2
-  const x = Math.floor(bot.entity.position.x + Math.cos(angle) * dist)
-  const z = Math.floor(bot.entity.position.z + Math.sin(angle) * dist)
-  try { bot.pathfinder.setGoal(new GoalNearXZ(x, z, 1)) } catch {}
-  state.followingId = null
-  state.nextWander = Date.now() + 4500 + Math.floor(Math.random() * 5000)
-}
-
 function startAI(state) {
-  stopAI(state)
-  if (!aiEnabled || !state.bot?.entity) return
+  if (state.aiTimer) clearInterval(state.aiTimer)
   const bot = state.bot
+  if (!bot?.entity) return
+  
   const movements = new Movements(bot)
   movements.canDig = false
   movements.allow1by1towers = false
   movements.maxDropDown = 3
   bot.pathfinder.setMovements(movements)
-  state.nextWander = Date.now() + 1000
-  state.lastHit = 0
 
   state.aiTimer = setInterval(async () => {
-    if (!aiEnabled || !state.connected || state.intentionalStop || state.permanentStop || !state.bot?.entity) return
+    if (!aiEnabled || !state.connected || !state.bot?.entity) return
+    
     const target = nearestHuman(bot)
     if (target) {
       const d = bot.entity.position.distanceTo(target.position)
       if (d <= CFG.followRadius) {
-        if (state.followingId !== target.id) {
-          try { bot.pathfinder.setGoal(new GoalFollow(target, CFG.followDistance), true); state.followingId = target.id } catch {}
-        }
-        if (bot.entity.onGround && Math.random() < 0.10) {
-          try { bot.setControlState('jump', true); setTimeout(() => bot.setControlState('jump', false), 220) } catch {}
-        }
-        if (hitEnabled && d <= CFG.hitDistance && Date.now() - state.lastHit > 1300 && Math.random() < 0.40) {
+        try { bot.pathfinder.setGoal(new GoalFollow(target, CFG.followDistance), true) } catch {}
+        
+        // Anti-Cheat Bypass: Randomized hit intervals and slight look offset
+        if (hitEnabled && d <= CFG.hitDistance && Date.now() - state.lastHit > (600 + Math.random() * 600)) {
           state.lastHit = Date.now()
-          try { await bot.lookAt(target.position.offset(0, 1.4, 0), true); bot.attack(target, true) } catch {}
+          const offsetX = (Math.random() - 0.5) * 0.4
+          const offsetY = (Math.random() - 0.5) * 0.4
+          try {
+            await bot.lookAt(target.position.offset(offsetX, 1.4 + offsetY, offsetX), true)
+            bot.attack(target, true)
+          } catch {}
         }
-        return
       }
     }
-    if (state.followingId !== null || Date.now() >= state.nextWander) wander(state)
   }, CFG.aiTick)
 }
 
-function clearDuration(state) {
-  if (state.stopTimer) clearTimeout(state.stopTimer)
-  state.stopTimer = null
-  state.deadline = null
-}
+function handleAuth(state, raw) {
+  if (!state.connected) return
+  const msg = String(raw || '').trim().toLowerCase()
+  if (!msg) return
 
-function startDuration(state) {
-  if (state.minutes <= 0 || state.deadline) return
-  state.deadline = Date.now() + state.minutes * 60000
-  state.stopTimer = setTimeout(() => {
-    state.intentionalStop = true
-    stopAI(state)
-    removeQueued(state)
-    log(`[${state.username}] Time finished. Leaving.`)
-    try { state.bot?.quit('Finished') } catch {}
-  }, state.minutes * 60000)
+  if (msg.includes('/register') || msg.includes('please register')) {
+    try { state.bot.chat(`/register ${CFG.authPassword} ${CFG.authPassword}`) } catch {}
+  } else if (msg.includes('/login') || msg.includes('please login')) {
+    try { state.bot.chat(`/login ${CFG.authPassword}`) } catch {}
+  }
 }
 
 function connectBot(state) {
-  if (shuttingDown || ipBanned || state.intentionalStop || state.permanentStop || state.connected || state.connecting) return
   state.connecting = true
-  state.lastKick = ''
-  state.lastError = ''
-  log(`[${state.username}] Connecting to ${state.port ? `${state.host}:${state.port}` : state.host} (${versionLabel(state.version)})...`)
+  
+  const proxyTag = state.proxy ? `[P]` : `[D]`
+  log(`[${state.username}] ${proxyTag} Connecting to ${targetHost}...`)
 
-  const opts = { host: state.host, username: state.username, auth: 'offline', keepAlive: true, hideErrors: true }
-  if (state.port) opts.port = state.port
-  if (state.version) opts.version = state.version
+  const opts = { 
+    host: targetHost, 
+    username: state.username, 
+    auth: 'offline', 
+    keepAlive: true, 
+    hideErrors: true,
+    port: targetPort,
+    version: targetVersion
+  }
+
+  if (state.proxy) {
+    opts.agent = new SocksProxyAgent({ host: state.proxy.host, port: state.proxy.port, type: 5 })
+  }
 
   let bot
   try { bot = mineflayer.createBot(opts) }
   catch (err) {
-    state.connecting = false
     log(`[${state.username}] CREATE ERROR: ${err.message}`)
-    return enqueue(state, CFG.retry, 'retry')
+    state.connecting = false
+    return enqueue(state, 5000, 'retry')
   }
 
   state.bot = bot
@@ -344,295 +216,176 @@ function connectBot(state) {
   bot.once('spawn', () => {
     state.connecting = false
     state.connected = true
-    state.detectedVersion = bot.version || state.version || null
-    state.restartRequested = false
-    state.lastKick = ''
-    state.lastError = ''
-    resetAuth(state)
-    log(`[${state.username}] JOINED${state.detectedVersion ? ` (${state.detectedVersion})` : ''}`)
-    startDuration(state)
+    log(`[${state.username}] JOINED. Starting AI...`)
     startAI(state)
   })
 
   bot.on('messagestr', msg => {
     handleAuth(state, msg)
-    if (logsEnabled) {
-      const s = String(msg || '').trim()
-      if (s) log(`[SERVER → ${state.username}] ${s}`)
-    }
+    if (logsEnabled) log(`[CHAT -> ${state.username}] ${msg}`)
   })
 
-  bot.on('kicked', reason => {
-    state.lastKick = reason
-    const type = classifyKick(reason)
-    if (type === 'ip_banned') { log(`[${state.username}] KICKED: IP BANNED`); return markIpBanned() }
-    if (type === 'player_banned') { log(`[${state.username}] KICKED: PLAYER BANNED`); return markPlayerBanned(state) }
-    if (type === 'throttled') return log(`[${state.username}] KICKED: connection throttled`)
-    log(`[${state.username}] KICKED: ${text(reason)}`)
-  })
+  bot.on('kicked', reason => log(`[${state.username}] KICKED: ${text(reason)}`))
+  bot.on('error', err => log(`[${state.username}] ERROR: ${err.message}`))
 
-  bot.on('error', err => {
-    state.lastError = err.code || err.message
-    log(`[${state.username}] ERROR: ${state.lastError}`)
-  })
-
-  bot.on('end', reason => {
-    stopAI(state)
+  bot.on('end', () => {
+    if (state.aiTimer) clearInterval(state.aiTimer)
     state.connected = false
     state.connecting = false
-    if (state.bot === bot) state.bot = null
-    if (shuttingDown || ipBanned || state.intentionalStop || state.permanentStop) return
-    if (state.deadline && Date.now() >= state.deadline) { state.intentionalStop = true; return }
-    if (state.restartRequested) { state.restartRequested = false; return enqueue(state, 0, 'restart') }
-    const kick = classifyKick(state.lastKick)
-    if (kick === 'ip_banned') return markIpBanned()
-    if (kick === 'player_banned') return markPlayerBanned(state)
-    enqueue(state, kick === 'throttled' ? CFG.throttleRetry : CFG.retry, kick === 'throttled' ? 'connection throttle' : 'retry')
+    state.bot = null
+    
+    if (!state.permanentStop) {
+      // Assign a NEW proxy on retry to ensure we don't reuse a banned IP
+      state.proxy = getNextProxy()
+      enqueue(state, 5000, 'retry')
+    } else {
+      states.delete(state.username.toLowerCase())
+      botNames.delete(state.username.toLowerCase())
+    }
   })
-}
-
-function manualRejoin(target) {
-  if (ipBanned) return log('Blocked: IP-ban state is active. Remove the server ban, then run resetban.')
-  const list = target.toLowerCase() === 'all' ? [...states.values()] : [states.get(target.toLowerCase())].filter(Boolean)
-  if (!list.length) return log(`Unknown bot: ${target}`)
-  let n = 0
-  for (const s of list) {
-    if (s.permanentStop || s.connected || s.connecting) continue
-    removeQueued(s)
-    clearDuration(s)
-    s.intentionalStop = false
-    s.lastKick = ''
-    s.lastError = ''
-    if (enqueue(s, 0, 'manual rejoin')) n++
-  }
-  log(`Rejoin queued for ${n} bot(s).`)
-}
-
-function restart(target) {
-  const list = target.toLowerCase() === 'all' ? [...states.values()] : [states.get(target.toLowerCase())].filter(Boolean)
-  if (!list.length) return log(`Unknown bot: ${target}`)
-  for (const s of list) {
-    if (s.permanentStop) continue
-    removeQueued(s)
-    clearDuration(s)
-    s.intentionalStop = false
-    s.restartRequested = true
-    if (s.bot) { try { s.bot.quit('Restart') } catch {} }
-    else enqueue(s, 0, 'restart')
-  }
-}
-
-function setVersion(rest) {
-  const args = rest.split(/\s+/).filter(Boolean)
-  if (!args.length) {
-    log('===== VERSIONS =====')
-    for (const s of states.values()) log(`${s.username}: configured=${versionLabel(s.version)}, detected=${s.detectedVersion || '-'}`)
-    return log('====================')
-  }
-  if (args.length === 1) {
-    const v = normalizeVersion(args[0])
-    for (const s of states.values()) s.version = v
-    return log(`All bots version set to ${versionLabel(v)} for next connection.`)
-  }
-  const target = args[0].toLowerCase()
-  const v = normalizeVersion(args[1])
-  if (target === 'all') {
-    for (const s of states.values()) s.version = v
-    return log(`All bots version set to ${versionLabel(v)} for next connection.`)
-  }
-  const s = states.get(target)
-  if (!s) return log(`Unknown bot: ${args[0]}`)
-  s.version = v
-  log(`[${s.username}] version set to ${versionLabel(v)} for next connection.`)
 }
 
 async function sendAll(message) {
   const online = [...states.values()].filter(s => s.connected && s.bot)
-  if (!online.length) return log('No bots online.')
   for (const s of online) {
-    try { s.bot.chat(message); log(`[${s.username}] → ${message}`); await sleep(450) }
-    catch (err) { log(`[${s.username}] CHAT ERROR: ${err.message}`) }
+    try { s.bot.chat(message); await sleep(300) } catch {}
+  }
+  log(`Sent message to ${online.length} bots.`)
+}
+
+function startSpam(message, interval) {
+  if (spamTimer) clearInterval(spamTimer)
+  spamTimer = setInterval(() => sendAll(message), interval)
+  log(`Spamming every ${interval}ms.`)
+}
+
+function stopSpam() {
+  if (spamTimer) {
+    clearInterval(spamTimer)
+    spamTimer = null
+    log('Spam stopped.')
   }
 }
 
-async function sendOne(name, message) {
-  const s = states.get(name.toLowerCase())
-  if (!s?.connected || !s.bot) return log(`${name} is not online.`)
-  try { s.bot.chat(message); log(`[${s.username}] → ${message}`) }
-  catch (err) { log(`[${s.username}] CHAT ERROR: ${err.message}`) }
+function startInfiniteSpawn() {
+  if (infiniteSpawn) return
+  infiniteSpawn = true
+  log('Infinite spawn mode enabled. Generating bots continuously...')
+  
+  spawnInterval = setInterval(() => {
+    const name = generateRealisticName()
+    if (!botNames.has(name.toLowerCase())) {
+      botNames.add(name.toLowerCase())
+      const state = {
+        username: name, bot: null, connected: false, connecting: false, queued: false,
+        intentionalStop: false, permanentStop: false, lastHit: 0, proxy: getNextProxy()
+      }
+      states.set(name.toLowerCase(), state)
+      enqueue(state, 0, 'infinite spawn')
+    }
+  }, 2000)
 }
 
-function status(s) {
-  if (s.stopReason === 'ip_banned') return 'IP BANNED / STOPPED'
-  if (s.stopReason === 'player_banned') return 'PLAYER BANNED / STOPPED'
-  if (s.permanentStop) return 'STOPPED'
-  if (s.connected) return 'ONLINE'
-  if (s.connecting) return 'CONNECTING'
-  if (s.queued) return `QUEUED (${s.queueReason})`
-  if (s.intentionalStop) return 'FINISHED'
-  return 'OFFLINE'
+function stopSpawn() {
+  if (spawnInterval) clearInterval(spawnInterval)
+  infiniteSpawn = false
+  log('Infinite spawn stopped. Existing bots will remain.')
 }
 
 function showBots() {
-  log('===== BOTS =====')
-  for (const s of states.values()) log(`${s.username}: ${status(s)} | version=${versionLabel(s.version)}${s.detectedVersion ? `/${s.detectedVersion}` : ''}`)
-  log('================')
+  let online = 0, connecting = 0
+  for (const s of states.values()) {
+    if (s.connected) online++
+    else if (s.connecting) connecting++
+  }
+  log(`Total: ${states.size} | Online: ${online} | Connecting: ${connecting}`)
 }
 
 function help() {
   log(`
-==============================
-BOT CONTROL
-
-all <message>
-one <name> <message>
+=== BOT CONTROL (CMD ONLY) ===
 list
-
-rejoin all | rejoin <name>
-restart all | restart <name>
-
-version
-version auto | version 1.21.11
-version all auto | version all 1.21.11
-version <name> auto | version <name> 1.21.11
-
-resetban
-resetplayer <name>
-resetall
-
-auth on | auth off
-authpass <password>
-
+spam <interval_ms> <message>
+stopspam
+stopspawn  (stops infinite generation)
 ai on | ai off
 hit on | hit off
 logs on | logs off
-
-help
 quit
 ==============================`)
 }
 
 function startControls() {
-  controlMode = true
   rl.setPrompt('BOT > ')
-  help()
-  prompt()
+  rl.prompt()
   rl.on('line', async input => {
-    promptVisible = false
     const line = input.trim()
-    if (!line) return prompt()
+    if (!line) return rl.prompt()
     const space = line.indexOf(' ')
     const cmd = (space < 0 ? line : line.slice(0, space)).toLowerCase()
     const rest = space < 0 ? '' : line.slice(space + 1).trim()
 
-    if (cmd === 'all') { if (rest) await sendAll(rest); else log('Use: all <message>') }
-    else if (cmd === 'one') {
+    if (cmd === 'list') showBots()
+    else if (cmd === 'spam') {
       const p = rest.indexOf(' ')
-      if (p < 0) log('Use: one <botname> <message>')
-      else await sendOne(rest.slice(0, p), rest.slice(p + 1).trim())
-    } else if (cmd === 'list') showBots()
-    else if (cmd === 'rejoin') rest ? manualRejoin(rest) : log('Use: rejoin all | rejoin <name>')
-    else if (cmd === 'restart') rest ? restart(rest) : log('Use: restart all | restart <name>')
-    else if (cmd === 'version') setVersion(rest)
-    else if (cmd === 'resetban') resetban()
-    else if (cmd === 'resetplayer') rest ? resetplayer(rest) : log('Use: resetplayer <name>')
-    else if (cmd === 'resetall') resetall()
-    else if (cmd === 'auth') {
-      if (rest === 'on') { autoAuthEnabled = true; log('Auto-auth ON') }
-      else if (rest === 'off') { autoAuthEnabled = false; log('Auto-auth OFF') }
-      else log('Use: auth on | auth off')
-    } else if (cmd === 'authpass') {
-      if (!rest) log('Use: authpass <password>')
-      else { authPassword = rest; log('Auto-auth password updated.') }
-    } else if (cmd === 'ai') {
-      if (rest === 'on') { aiEnabled = true; for (const s of states.values()) if (s.connected) startAI(s); log('AI ON') }
-      else if (rest === 'off') { aiEnabled = false; for (const s of states.values()) stopAI(s); log('AI OFF') }
-      else log('Use: ai on | ai off')
-    } else if (cmd === 'hit') {
-      if (rest === 'on' || rest === 'off') { hitEnabled = rest === 'on'; log(`Punching ${hitEnabled ? 'ON' : 'OFF'}`) }
-      else log('Use: hit on | hit off')
-    } else if (cmd === 'logs') {
-      if (rest === 'on' || rest === 'off') { logsEnabled = rest === 'on'; log(`Server logs ${logsEnabled ? 'ON' : 'OFF'}`) }
-      else log('Use: logs on | logs off')
-    } else if (cmd === 'help') help()
-    else if (cmd === 'quit') return quitAll()
+      if (p < 0) log('Use: spam <interval_ms> <message>')
+      else startSpam(rest.slice(p + 1).trim(), parseInt(rest.slice(0, p)))
+    }
+    else if (cmd === 'stopspam') stopSpam()
+    else if (cmd === 'stopspawn') stopSpawn()
+    else if (cmd === 'ai') { aiEnabled = rest === 'on'; log(`AI ${aiEnabled ? 'ON' : 'OFF'}`) }
+    else if (cmd === 'hit') { hitEnabled = rest === 'on'; log(`Hitting ${hitEnabled ? 'ON' : 'OFF'}`) }
+    else if (cmd === 'logs') { logsEnabled = rest === 'on'; log(`Logs ${logsEnabled ? 'ON' : 'OFF'}`) }
+    else if (cmd === 'help') help()
+    else if (cmd === 'quit') {
+      log('Disconnecting all...')
+      for (const s of states.values()) { try { s.bot?.quit() } catch {} }
+      process.exit(0)
+    }
     else log('Unknown command. Type: help')
-    prompt()
+    rl.prompt()
   })
-}
-
-function quitAll() {
-  if (shuttingDown) return
-  shuttingDown = true
-  promptVisible = false
-  process.stdout.write('\nDisconnecting bots...\n')
-  if (queueTimer) clearTimeout(queueTimer)
-  queue.length = 0
-  for (const s of states.values()) {
-    s.intentionalStop = true
-    clearDuration(s)
-    stopAI(s)
-    try { s.bot?.quit('Stopped from controller') } catch {}
-  }
-  setTimeout(() => process.exit(0), 700)
 }
 
 async function main() {
-  console.log('\n=== MINECRAFT MULTIBOT PRO ===\n')
-  const host = (await ask('Server IP / hostname: ')).trim()
-  const portText = (await ask('Port (blank = Java SRV/auto): ')).trim()
-  const versionText = (await ask('Minecraft version (blank/auto = auto-detect): ')).trim()
-  const namesText = await ask(`Bot names separated by commas (max ${CFG.maxBots}): `)
-  const minutesText = (await ask('Minutes to stay (0 = until quit): ')).trim()
+  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v3.1 ===\n')
+  
+  // 1. Fetch proxies automatically
+  proxyList = await fetchProxies()
+  console.log(`Auto-loaded ${proxyList.length} SOCKS5 proxies.`)
 
-  if (!host) return console.log('Server hostname is required.')
-  let port = null
-  if (portText) {
-    port = Number(portText)
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return console.log('Invalid port.')
-  }
-  const version = normalizeVersion(versionText)
-  const minutes = Number(minutesText || 0)
-  if (!Number.isFinite(minutes) || minutes < 0) return console.log('Invalid minutes.')
+  // 2. Ask user for server details
+  targetHost = (await ask('Target Server IP: ')).trim()
+  const portText = (await ask('Port (blank = auto): ')).trim()
+  const versionText = (await ask('Version (blank = auto): ')).trim()
+  const countText = (await ask('How many bots to generate? (0 = infinite until stopped): ')).trim()
 
-  const seen = new Set()
-  const names = namesText.split(',').map(x => x.trim()).filter(Boolean).filter(name => {
-    const key = name.toLowerCase()
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-  if (!names.length) return console.log('Enter at least one bot name.')
-  if (names.length > CFG.maxBots) return console.log(`Maximum ${CFG.maxBots} bots in this build.`)
-  const invalid = names.filter(name => !/^[A-Za-z0-9_]{3,16}$/.test(name))
-  if (invalid.length) return console.log(`Invalid usernames: ${invalid.join(', ')}`)
+  if (portText) targetPort = Number(portText)
+  if (versionText && versionText.toLowerCase() !== 'auto') targetVersion = versionText
 
-  for (const username of names) {
-    botNames.add(username.toLowerCase())
-    states.set(username.toLowerCase(), {
-      username, host, port, version, detectedVersion: null, minutes,
-      bot: null, connected: false, connecting: false, queued: false, queueReason: '',
-      intentionalStop: false, permanentStop: false, stopReason: null, restartRequested: false,
-      stopTimer: null, deadline: null, aiTimer: null, lastKick: '', lastError: '',
-      followingId: null, nextWander: 0, lastHit: 0, authUntil: 0,
-      auth: { registerAttempts: 0, loginAttempts: 0, lastRegister: 0, lastLogin: 0 }
-    })
+  // 3. Generate initial batch
+  const count = parseInt(countText || '0')
+  if (count === 0) {
+    startInfiniteSpawn()
+  } else {
+    for (let i = 0; i < count; i++) {
+      const name = generateRealisticName()
+      botNames.add(name.toLowerCase())
+      const state = { username: name, bot: null, connected: false, connecting: false, queued: false, intentionalStop: false, permanentStop: false, lastHit: 0, proxy: getNextProxy() }
+      states.set(name.toLowerCase(), state)
+      enqueue(state, i * 500, 'generated')
+    }
   }
 
-  console.log(`\nServer: ${host}${port ? `:${port}` : ' (SRV/auto port)'}`)
-  console.log(`Version: ${versionLabel(version)}`)
-  console.log(`Bots: ${names.length}`)
-  console.log(`Connection gap: ${CFG.joinGap / 1000}s`)
-  console.log(`Auto-auth: ON for first ${CFG.authWindow / 1000}s after each join\n`)
-
-  for (const s of states.values()) enqueue(s, 0, 'initial join')
+  console.log(`\nTarget: ${targetHost}${targetPort ? ':' + targetPort : ''}`)
+  console.log(`Starting swarm. Proxies are automatically rotating.\n`)
+  
   startControls()
 }
 
-process.on('SIGINT', quitAll)
-process.on('SIGTERM', quitAll)
-
-main().catch(err => {
-  console.error(err)
-  process.exit(1)
+process.on('SIGINT', () => {
+  log('Exiting...')
+  process.exit(0)
 })
+
+main().catch(err => console.error(err))
