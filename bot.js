@@ -1,4 +1,4 @@
-// === MINECRAFT SWARM AUTO-PROXY v8.1 ===
+// === MINECRAFT SWARM AUTO-PROXY v9.0 ===
 // Credits: Smile B
 // GitHub: Smile-B14
 
@@ -37,6 +37,9 @@ let infiniteSpawn = false
 let spawnInterval = null
 let isStealMode = false
 
+// Auto-replenish logic
+let maintainCount = 0
+
 let targetHost = ''
 let targetPort = null
 let targetVersion = null
@@ -62,7 +65,7 @@ const setupRl = readline.createInterface({
 const ask = q => new Promise(resolve => setupRl.question(q, resolve))
 
 async function initialSetup() {
-  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v8.1 ===')
+  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v9.0 ===')
   console.log('Credits: Smile B\n')
   
   const stealMode = await ask('Enable Steal Player Mode initially? (y/n): ')
@@ -76,10 +79,10 @@ async function initialSetup() {
   const versionText = (await ask('Version (blank = auto): ')).trim()
   if (versionText && versionText.toLowerCase() !== 'auto') targetVersion = versionText
 
-  const countText = (await ask('How many bots to start with? (0 = infinite): ')).trim()
+  const countText = (await ask('How many bots to maintain? (0 = infinite spam): ')).trim()
   const count = parseInt(countText || '0')
   
-  setupRl.close() // Close standard input to prevent double typing
+  setupRl.close() // Close standard input to prevent double typing in UI
 
   // Fetch proxies before UI starts
   console.log('Fetching public SOCKS5 proxies...')
@@ -96,7 +99,7 @@ let screen, header, logBox, menuBox, inputBox
 function initUI() {
   screen = blessed.screen({
     smartCSR: true,
-    title: 'Minecraft Swarm v8.1 | Smile B',
+    title: 'Minecraft Swarm v9.0 | Smile B',
     fullUnicode: true,
     style: { fg: 'white', bg: 'black' }
   })
@@ -107,7 +110,7 @@ function initUI() {
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, fg: 'white', bold: true },
     tags: true,
-    content: ' {cyan-fg}MINECRAFT SWARM v8.1{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
+    content: ' {cyan-fg}MINECRAFT SWARM v9.0{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
   })
 
   logBox = blessed.log({
@@ -131,24 +134,22 @@ function initUI() {
     label: ' Status & Commands '
   })
 
+  // Fixed input box to prevent double typing
   inputBox = blessed.textbox({
     parent: screen,
     bottom: 0, left: 0, width: '100%', height: 3,
     border: { type: 'line' },
     style: { border: { fg: 'yellow' }, fg: 'white' },
-    label: ' Input (Type command & press Enter) ',
-    inputOnFocus: true,
-    keys: true
+    label: ' Input (Type command & press Enter) '
   })
 
   inputBox.on('submit', (text) => {
     handleInput(text.trim())
     inputBox.clearValue()
-    inputBox.focus()
-    screen.render()
+    inputBox.readInput() // Keep listening without conflicting with readline
   })
-
-  inputBox.focus()
+  
+  inputBox.readInput()
   screen.render()
 }
 
@@ -173,7 +174,7 @@ function updateUI() {
     else if (s.connecting) connecting++
   }
   
-  header.setContent(` {cyan-fg}MINECRAFT SWARM v8.1{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Total: ${states.size} | Dead Proxies: ${deadProxiesGlobal.size}`)
+  header.setContent(` {cyan-fg}MINECRAFT SWARM v9.0{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Target: ${maintainCount === 0 ? 'INF' : maintainCount} | Dead Proxies: ${deadProxiesGlobal.size}`)
   
   menuBox.setContent(
     `{cyan-fg}=== Settings ==={/}\n` +
@@ -217,6 +218,24 @@ async function fetchProxies() {
     }).on('error', () => resolve([]))
   })
 }
+
+// Auto-refresh proxies every 60 seconds
+setInterval(async () => {
+  try {
+    const fetched = await fetchProxies()
+    let added = 0
+    for (const p of fetched) {
+      if (!proxyPool.find(x => x.proxyUrl === p.proxyUrl)) {
+        proxyPool.push(p)
+        added++
+      }
+    }
+    if (added > 0) {
+      uiLog(`{cyan-fg}Auto-refresh: Added ${added} new proxies. Total: ${proxyPool.length}{/}`)
+      updateUI()
+    }
+  } catch (e) {}
+}, 60000)
 
 function getProxyForServer(serverHost) {
   const used = usedProxiesForServer.get(serverHost) || new Set()
@@ -535,6 +554,7 @@ function stopSpam() {
 function startInfiniteSpawn() {
   if (infiniteSpawn) return
   infiniteSpawn = true
+  maintainCount = 0 // Turn off maintenance if infinite
   uiLog(`{yellow-fg}Infinite spawn mode enabled. Generating bots continuously...{/}`)
   updateUI()
   spawnInterval = setInterval(() => {
@@ -560,6 +580,7 @@ function stopSpawn() {
 function stopJoin() {
   if (spawnInterval) clearInterval(spawnInterval)
   infiniteSpawn = false
+  maintainCount = 0 // Stop replenishing
   queue.length = 0 
   uiLog(`{yellow-fg}Queue cleared. No new bots will join. Online bots will stay.{/}`)
   updateUI()
@@ -569,6 +590,7 @@ function addBots(count) {
   if (count === 0) {
     startInfiniteSpawn()
   } else {
+    maintainCount += count
     for (let i = 0; i < count; i++) {
       const name = generateRealisticName()
       botNames.add(name.toLowerCase())
@@ -576,9 +598,30 @@ function addBots(count) {
       states.set(name.toLowerCase(), state)
       enqueue(state, 0, 'added via cmd')
     }
-    uiLog(`{cyan-fg}Generating ${count} new bots...{/}`)
+    uiLog(`{cyan-fg}Generating ${count} new bots. Target total: ${maintainCount}{/}`)
   }
 }
+
+// Auto-replenish bots if they get banned/disconnected
+setInterval(() => {
+  if (maintainCount > 0 && !infiniteSpawn) {
+    let aliveBots = 0
+    for (const s of states.values()) {
+      if (!s.permanentStop) aliveBots++
+    }
+    if (aliveBots < maintainCount) {
+      const needed = maintainCount - aliveBots
+      uiLog(`{yellow-fg}Maintaining count: Replacing ${needed} lost bot(s).{/}`)
+      for (let i = 0; i < needed; i++) {
+        const name = generateRealisticName()
+        botNames.add(name.toLowerCase())
+        const state = { username: name, bot: null, connected: false, connecting: false, queued: false, intentionalStop: false, permanentStop: false, lastHit: 0, proxy: getProxyForServer(targetHost), isStolen: customNames.length > 0 }
+        states.set(name.toLowerCase(), state)
+        enqueue(state, 0, 'replacement')
+      }
+    }
+  }
+}, 5000)
 
 async function toggleSteal(mode) {
   if (mode === 'on') {
@@ -644,9 +687,10 @@ async function main() {
     
     initUI() // Start visual UI
     
-    uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v8.1 ==={/}')
+    uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v9.0 ==={/}')
     uiLog('{magenta-fg}Credits: Smile B{/}')
     uiLog(`{green-fg}Auto-loaded ${proxyPool.length} SOCKS5 proxies.{/}`)
+    uiLog('{cyan-fg}Proxies will auto-refresh every 60 seconds.{/}')
     
     if (isStealMode) {
       uiLog('{magenta-fg}[Steal]{/} Scanning server for initial names...')
