@@ -7,7 +7,7 @@ const { SocksProxyAgent } = require('socks-proxy-agent')
 const https = require('https')
 
 const CFG = {
-  joinGap: 2000, 
+  joinGap: 1500, 
   followRadius: 40,
   followDistance: 2,
   hitDistance: 3.5,
@@ -38,8 +38,12 @@ let spawnInterval = null
 let targetHost = ''
 let targetPort = null
 let targetVersion = null
-let proxyList = []
-let proxyIndex = 0
+
+// Proxy Memory Management
+const proxyPool = []
+const deadProxiesGlobal = new Set()
+const usedProxiesForServer = new Map() // serverHost -> Set of proxy URLs
+const bannedProxiesForServer = new Map() // serverHost -> Set of proxy URLs
 
 const ask = q => new Promise(resolve => rl.question(q, resolve))
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -47,13 +51,12 @@ const text = v => typeof v === 'string' ? v : JSON.stringify(v)
 
 // Global crash preventers
 process.on('uncaughtException', (err) => {
-  log(`CRASH PREVENTED (Uncaught Exception): ${err.message}`)
+  log(`CRASH PREVENTED (Uncaught): ${err.message}`)
 })
 process.on('unhandledRejection', (err) => {
-  log(`CRASH PREVENTED (Unhandled Rejection): ${err}`)
+  log(`CRASH PREVENTED (Rejection): ${err}`)
 })
 
-// --- Input Validation ---
 async function askValid(question, validator) {
   while (true) {
     const res = (await ask(question)).trim()
@@ -74,8 +77,11 @@ async function fetchProxies() {
         try {
           const list = data.split('\r\n').filter(Boolean).map(p => {
             const [host, port] = p.split(':')
-            return { host, port: parseInt(port) }
-          }).filter(p => p.host && p.port)
+            if (host && port) {
+              return { host, port: parseInt(port), proxyUrl: `socks5://${host}:${port}` }
+            }
+            return null
+          }).filter(Boolean)
           resolve(list)
         } catch (e) {
           resolve([])
@@ -85,35 +91,74 @@ async function fetchProxies() {
   })
 }
 
-function getNextProxy() {
-  if (!proxyList.length) return null
-  const proxy = proxyList[proxyIndex % proxyList.length]
-  proxyIndex++
+function getProxyForServer(serverHost) {
+  const used = usedProxiesForServer.get(serverHost) || new Set()
+  const banned = bannedProxiesForServer.get(serverHost) || new Set()
+  
+  // Find a proxy not dead, not banned on this server, and not used on this server yet
+  const available = proxyPool.filter(p => 
+    !deadProxiesGlobal.has(p.proxyUrl) && 
+    !banned.has(p.proxyUrl) && 
+    !used.has(p.proxyUrl)
+  )
+  
+  if (available.length === 0) {
+    log("WARNING: Ran out of fresh proxies for this server. Reusing an unbanned one...")
+    const recyclable = proxyPool.filter(p => !deadProxiesGlobal.has(p.proxyUrl) && !banned.has(p.proxyUrl))
+    if (recyclable.length > 0) {
+      return recyclable[Math.floor(Math.random() * recyclable.length)]
+    }
+    
+    // Absolute fallback
+    const anyAlive = proxyPool.filter(p => !deadProxiesGlobal.has(p.proxyUrl))
+    if (anyAlive.length > 0) return anyAlive[Math.floor(Math.random() * anyAlive.length)]
+    return null
+  }
+  
+  const proxy = available[Math.floor(Math.random() * available.length)]
+  used.add(proxy.proxyUrl)
+  usedProxiesForServer.set(serverHost, used)
   return proxy
 }
 
-function buildProxyUrl(proxy) {
-  if (!proxy) return null
-  return `socks5://${proxy.host}:${proxy.port}`
+function banProxy(serverHost, proxy, reason) {
+  if (!proxy) return
+  deadProxiesGlobal.add(proxy.proxyUrl) // ban globally so we don't try it again anywhere
+  
+  const banned = bannedProxiesForServer.get(serverHost) || new Set()
+  banned.add(proxy.proxyUrl)
+  bannedProxiesForServer.set(serverHost, banned)
+  
+  log(`Proxy ${proxy.host}:${proxy.port} blacklisted (${reason}). Total dead: ${deadProxiesGlobal.size}`)
 }
 
-// --- Random Username Generator ---
-const nameParts = {
-  pre: ['xX', 'Pro', 'Itz', 'The', 'Real', 'Just', 'i', 'Snipe'],
-  mid: ['Steve', 'Alex', 'Pixel', 'Block', 'Craft', 'Mine', 'Epic', 'God', 'Dark', 'Shadow', 'Cool', 'Smart'],
-  suf: ['Xx', 'YT', '99', '123', '_', 'Pro', 'GG', '420', '69', '777']
-}
+// --- Advanced Name Generator ---
 function generateRealisticName() {
+  const prefixes = ['xX', 'Itz', 'Pro', 'The', 'i', '_', 'Mr', 'Lil', 'xX_', 'The_']
+  const names = ['Steve', 'Alex', 'Pixel', 'Block', 'Craft', 'Mine', 'Epic', 'God', 'Dark', 'Shadow', 'Cool', 'Smart', 'Sniper', 'Gamer', 'Noob', 'King', 'Boss', 'PvP', 'Slayer', 'Zombie', 'Creeper']
+  const suffixes = ['Xx', '_Xx', 'YT', '99', '123', '_', 'Pro', 'GG', '420', '69', '777', 'x', '_']
+  
   let name = ''
-  const pattern = Math.floor(Math.random() * 4)
-  if (pattern === 0) name = `${nameParts.pre[Math.floor(Math.random()*nameParts.pre.length)]}${nameParts.mid[Math.floor(Math.random()*nameParts.mid.length)]}`
-  else if (pattern === 1) name = `${nameParts.mid[Math.floor(Math.random()*nameParts.mid.length)]}${nameParts.suf[Math.floor(Math.random()*nameParts.suf.length)]}`
-  else if (pattern === 2) name = `${nameParts.mid[Math.floor(Math.random()*nameParts.mid.length)]}_${Math.floor(Math.random() * 999)}`
-  else name = `${nameParts.pre[Math.floor(Math.random()*nameParts.pre.length)]}${nameParts.mid[Math.floor(Math.random()*nameParts.mid.length)]}${nameParts.suf[Math.floor(Math.random()*nameParts.suf.length)]}`
-
+  const r = Math.random()
+  
+  if (r < 0.25) {
+    name = `xX${names[Math.floor(Math.random()*names.length)]}Xx`
+  } else if (r < 0.5) {
+    name = `${names[Math.floor(Math.random()*names.length)]}_${Math.floor(Math.random() * 9999)}`
+  } else if (r < 0.75) {
+    name = `${names[Math.floor(Math.random()*names.length)]}${suffixes[Math.floor(Math.random()*suffixes.length)]}`
+  } else {
+    name = `${prefixes[Math.floor(Math.random()*prefixes.length)]}${names[Math.floor(Math.random()*names.length)]}`
+  }
+  
+  if (Math.random() < 0.4 && name.length < 13) {
+    name += Math.floor(Math.random() * 999)
+  }
+  
   name = name.replace(/[^A-Za-z0-9_]/g, '')
   if (name.length < 4) name += Math.floor(Math.random() * 9999)
   if (name.length > 16) name = name.substring(0, 16)
+  
   return name
 }
 
@@ -158,8 +203,8 @@ function runQueue() {
   try {
     connectBot(entry.state)
   } catch (e) {
-    log(`Queue error connecting ${entry.state.username}: ${e.message}. Rotating proxy and retrying...`)
-    entry.state.proxy = getNextProxy()
+    log(`Queue error: ${e.message}. Retrying...`)
+    entry.state.proxy = getProxyForServer(targetHost)
     enqueue(entry.state, 3000, 'queue error retry')
   }
   scheduleQueue()
@@ -174,18 +219,18 @@ function nearestHuman(bot) {
 }
 
 function startAI(state) {
-  if (state.aiTimer) clearInterval(state.aiTimer)
-  const bot = state.bot
-  if (!bot?.entity) return
-  
   try {
+    if (state.aiTimer) clearInterval(state.aiTimer)
+    const bot = state.bot
+    if (!bot?.entity) return
+    
     const movements = new Movements(bot)
     movements.canDig = false
     movements.allow1by1towers = false
     movements.maxDropDown = 3
     bot.pathfinder.setMovements(movements)
   } catch (e) {
-    log(`[${state.username}] AI movement setup error: ${e.message}`)
+    log(`[${state.username}] AI setup error: ${e.message}`)
   }
 
   state.aiTimer = setInterval(async () => {
@@ -194,17 +239,17 @@ function startAI(state) {
       
       const target = nearestHuman(bot)
       if (target) {
-        const d = bot.entity.position.distanceTo(target.position)
+        const d = state.bot.entity.position.distanceTo(target.position)
         if (d <= CFG.followRadius) {
-          try { bot.pathfinder.setGoal(new GoalFollow(target, CFG.followDistance), true) } catch {}
+          try { state.bot.pathfinder.setGoal(new GoalFollow(target, CFG.followDistance), true) } catch {}
           
           if (hitEnabled && d <= CFG.hitDistance && Date.now() - state.lastHit > (600 + Math.random() * 600)) {
             state.lastHit = Date.now()
             const offsetX = (Math.random() - 0.5) * 0.4
             const offsetY = (Math.random() - 0.5) * 0.4
             try {
-              await bot.lookAt(target.position.offset(offsetX, 1.4 + offsetY, offsetX), true)
-              bot.attack(target, true)
+              await state.bot.lookAt(target.position.offset(offsetX, 1.4 + offsetY, offsetX), true)
+              state.bot.attack(target, true)
             } catch {}
           }
         }
@@ -247,15 +292,12 @@ function connectBot(state) {
 
   if (state.proxy) {
     try {
-      const proxyUrl = buildProxyUrl(state.proxy)
-      if (proxyUrl) {
-        opts.agent = new SocksProxyAgent(proxyUrl)
-      }
+      opts.agent = new SocksProxyAgent(state.proxy.proxyUrl)
     } catch (e) {
-      log(`[${state.username}] Proxy agent error, rotating...`)
+      banProxy(targetHost, state.proxy, 'Agent Init Error')
       state.connecting = false
-      state.proxy = getNextProxy()
-      return enqueue(state, 1000, 'proxy error retry')
+      state.proxy = getProxyForServer(targetHost)
+      return enqueue(state, 1000, 'proxy init error retry')
     }
   }
 
@@ -266,7 +308,7 @@ function connectBot(state) {
   catch (err) {
     log(`[${state.username}] CREATE ERROR: ${err.message}. Retrying in 5s...`)
     state.connecting = false
-    state.proxy = getNextProxy()
+    state.proxy = getProxyForServer(targetHost)
     return enqueue(state, 5000, 'retry')
   }
 
@@ -286,9 +328,23 @@ function connectBot(state) {
     if (logsEnabled) log(`[CHAT -> ${state.username}] ${msg}`)
   })
 
-  bot.on('kicked', reason => log(`[${state.username}] KICKED: ${text(reason)}`))
+  bot.on('kicked', reason => {
+    const reasonStr = text(reason).toLowerCase()
+    log(`[${state.username}] KICKED: ${text(reason)}`)
+    
+    // If kicked for IP ban, mark proxy as banned for this server
+    if (reasonStr.includes('ip_banned') || reasonStr.includes('ip banned') || reasonStr.includes('banned')) {
+      banProxy(targetHost, state.proxy, 'IP Banned by Server')
+    }
+  })
+
   bot.on('error', err => {
     log(`[${state.username}] ERROR: ${err.message}`)
+    
+    // If proxy connection fails, blacklist it
+    if (state.proxy && (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET' || err.message.includes('socks') || err.message.includes('proxy'))) {
+      banProxy(targetHost, state.proxy, 'Connection Error')
+    }
   })
 
   bot.on('end', () => {
@@ -298,8 +354,9 @@ function connectBot(state) {
     state.bot = null
     
     if (!state.permanentStop) {
-      state.proxy = getNextProxy()
-      enqueue(state, 5000, 'retry')
+      // Always get a fresh proxy that hasn't been used/banned on this server
+      state.proxy = getProxyForServer(targetHost)
+      enqueue(state, 3000, 'retry')
     } else {
       states.delete(state.username.toLowerCase())
       botNames.delete(state.username.toLowerCase())
@@ -335,15 +392,20 @@ function startInfiniteSpawn() {
   log('Infinite spawn mode enabled. Generating bots continuously...')
   
   spawnInterval = setInterval(() => {
-    const name = generateRealisticName()
-    if (!botNames.has(name.toLowerCase())) {
-      botNames.add(name.toLowerCase())
-      const state = {
-        username: name, bot: null, connected: false, connecting: false, queued: false,
-        intentionalStop: false, permanentStop: false, lastHit: 0, proxy: getNextProxy()
+    try {
+      const name = generateRealisticName()
+      if (!botNames.has(name.toLowerCase())) {
+        botNames.add(name.toLowerCase())
+        const state = {
+          username: name, bot: null, connected: false, connecting: false, queued: false,
+          intentionalStop: false, permanentStop: false, lastHit: 0, 
+          proxy: getProxyForServer(targetHost)
+        }
+        states.set(name.toLowerCase(), state)
+        enqueue(state, 0, 'infinite spawn')
       }
-      states.set(name.toLowerCase(), state)
-      enqueue(state, 0, 'infinite spawn')
+    } catch (e) {
+      log(`Spawn gen error: ${e.message}`)
     }
   }, 2000)
 }
@@ -360,7 +422,7 @@ function showBots() {
     if (s.connected) online++
     else if (s.connecting) connecting++
   }
-  log(`Total: ${states.size} | Online: ${online} | Connecting: ${connecting}`)
+  log(`Total: ${states.size} | Online: ${online} | Connecting: ${connecting} | Dead Proxies: ${deadProxiesGlobal.size}`)
 }
 
 function help() {
@@ -414,12 +476,12 @@ function startControls() {
 }
 
 async function main() {
-  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v3.2 (Crash-Proof) ===\n')
+  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v4.0 (Crash-Proof) ===\n')
   
-  proxyList = await fetchProxies()
-  console.log(`Auto-loaded ${proxyList.length} SOCKS5 proxies.`)
+  const fetched = await fetchProxies()
+  proxyPool.push(...fetched)
+  console.log(`Auto-loaded ${proxyPool.length} SOCKS5 proxies.`)
 
-  // Validated Inputs
   targetHost = await askValid('Target Server IP: ', (v) => v.length > 2 ? true : 'IP must be at least 3 characters.')
   
   const portText = await askValid('Port (blank = auto): ', (v) => {
@@ -447,14 +509,18 @@ async function main() {
     for (let i = 0; i < count; i++) {
       const name = generateRealisticName()
       botNames.add(name.toLowerCase())
-      const state = { username: name, bot: null, connected: false, connecting: false, queued: false, intentionalStop: false, permanentStop: false, lastHit: 0, proxy: getNextProxy() }
+      const state = { 
+        username: name, bot: null, connected: false, connecting: false, queued: false, 
+        intentionalStop: false, permanentStop: false, lastHit: 0, 
+        proxy: getProxyForServer(targetHost) 
+      }
       states.set(name.toLowerCase(), state)
       enqueue(state, i * 500, 'generated')
     }
   }
 
   console.log(`\nTarget: ${targetHost}${targetPort ? ':' + targetPort : ''}`)
-  console.log(`Starting swarm. Proxies are automatically rotating.\n`)
+  console.log(`Starting swarm. Proxies are automatically rotating and remembering past IPs.\n`)
   
   startControls()
 }
