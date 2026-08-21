@@ -6,7 +6,7 @@ Cross-platform Minecraft Java multi-bot controller built with Mineflayer. Runs i
 
 ## Features
 
-- Up to 30 offline/cracked-mode bot usernames
+- Up to 10000 offline/cracked-mode bot usernames
 - Java-style SRV/automatic port lookup when port is left blank
 - Minecraft version auto-detection by default
 - Global or per-bot version selection
