@@ -1,4 +1,4 @@
-// === MINECRAFT SWARM AUTO-PROXY v9.0 ===
+// === MINECRAFT SWARM AUTO-PROXY v9.1 ===
 // Credits: Smile B
 // GitHub: Smile-B14
 
@@ -37,7 +37,6 @@ let infiniteSpawn = false
 let spawnInterval = null
 let isStealMode = false
 
-// Auto-replenish logic
 let maintainCount = 0
 
 let targetHost = ''
@@ -65,7 +64,7 @@ const setupRl = readline.createInterface({
 const ask = q => new Promise(resolve => setupRl.question(q, resolve))
 
 async function initialSetup() {
-  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v9.0 ===')
+  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v9.1 ===')
   console.log('Credits: Smile B\n')
   
   const stealMode = await ask('Enable Steal Player Mode initially? (y/n): ')
@@ -82,9 +81,8 @@ async function initialSetup() {
   const countText = (await ask('How many bots to maintain? (0 = infinite spam): ')).trim()
   const count = parseInt(countText || '0')
   
-  setupRl.close() // Close standard input to prevent double typing in UI
+  setupRl.close()
 
-  // Fetch proxies before UI starts
   console.log('Fetching public SOCKS5 proxies...')
   const fetched = await fetchProxies()
   proxyPool.push(...fetched)
@@ -94,12 +92,13 @@ async function initialSetup() {
 }
 
 // --- BLESSED UI SETUP ---
-let screen, header, logBox, menuBox, inputBox
+let screen, header, logBox, menuBox, inputDisplay
+let inputBuffer = ''
 
 function initUI() {
   screen = blessed.screen({
     smartCSR: true,
-    title: 'Minecraft Swarm v9.0 | Smile B',
+    title: 'Minecraft Swarm v9.1 | Smile B',
     fullUnicode: true,
     style: { fg: 'white', bg: 'black' }
   })
@@ -110,7 +109,7 @@ function initUI() {
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, fg: 'white', bold: true },
     tags: true,
-    content: ' {cyan-fg}MINECRAFT SWARM v9.0{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
+    content: ' {cyan-fg}MINECRAFT SWARM v9.1{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
   })
 
   logBox = blessed.log({
@@ -134,22 +133,35 @@ function initUI() {
     label: ' Status & Commands '
   })
 
-  // Fixed input box to prevent double typing
-  inputBox = blessed.textbox({
+  // Replaced buggy textbox with a static display to prevent double typing
+  inputDisplay = blessed.box({
     parent: screen,
     bottom: 0, left: 0, width: '100%', height: 3,
     border: { type: 'line' },
     style: { border: { fg: 'yellow' }, fg: 'white' },
-    label: ' Input (Type command & press Enter) '
+    label: ' Input (Type command & press Enter) ',
+    content: ''
   })
 
-  inputBox.on('submit', (text) => {
-    handleInput(text.trim())
-    inputBox.clearValue()
-    inputBox.readInput() // Keep listening without conflicting with readline
+  // Manual keypress listener - 100% immune to double typing in Termux
+  screen.on('keypress', (ch, key) => {
+    if (key.full === 'return' || key.full === 'enter') {
+      const cmd = inputBuffer.trim()
+      inputBuffer = ''
+      inputDisplay.setContent('')
+      screen.render()
+      if (cmd) handleInput(cmd)
+    } else if (key.full === 'backspace') {
+      inputBuffer = inputBuffer.slice(0, -1)
+      inputDisplay.setContent(inputBuffer)
+      screen.render()
+    } else if (ch && !key.ctrl && !key.meta && !key.full.startsWith('C-') && !key.full.startsWith('M-')) {
+      inputBuffer += ch
+      inputDisplay.setContent(inputBuffer)
+      screen.render()
+    }
   })
-  
-  inputBox.readInput()
+
   screen.render()
 }
 
@@ -174,7 +186,7 @@ function updateUI() {
     else if (s.connecting) connecting++
   }
   
-  header.setContent(` {cyan-fg}MINECRAFT SWARM v9.0{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Target: ${maintainCount === 0 ? 'INF' : maintainCount} | Dead Proxies: ${deadProxiesGlobal.size}`)
+  header.setContent(` {cyan-fg}MINECRAFT SWARM v9.1{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Target: ${maintainCount === 0 ? 'INF' : maintainCount} | Dead Proxies: ${deadProxiesGlobal.size}`)
   
   menuBox.setContent(
     `{cyan-fg}=== Settings ==={/}\n` +
@@ -506,6 +518,16 @@ function connectBot(state) {
     if (state.proxy && (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET' || err.message.includes('socks') || err.message.includes('proxy'))) {
       banProxy(targetHost, state.proxy, 'Connection Error')
     }
+    
+    // Fallback Retry System: If error fires but 'end' doesn't, force requeue after 2s
+    state.connecting = false // Unblock so it can retry
+    setTimeout(() => {
+      if (!state.connected && !state.queued && !state.permanentStop) {
+        uiLog(`{yellow-fg}[${state.username}] Connection stuck. Force retrying with new proxy...{/}`)
+        state.proxy = getProxyForServer(targetHost)
+        enqueue(state, 1000, 'force error retry')
+      }
+    }, 2000)
   })
 
   bot.on('end', () => {
@@ -554,7 +576,7 @@ function stopSpam() {
 function startInfiniteSpawn() {
   if (infiniteSpawn) return
   infiniteSpawn = true
-  maintainCount = 0 // Turn off maintenance if infinite
+  maintainCount = 0
   uiLog(`{yellow-fg}Infinite spawn mode enabled. Generating bots continuously...{/}`)
   updateUI()
   spawnInterval = setInterval(() => {
@@ -580,7 +602,7 @@ function stopSpawn() {
 function stopJoin() {
   if (spawnInterval) clearInterval(spawnInterval)
   infiniteSpawn = false
-  maintainCount = 0 // Stop replenishing
+  maintainCount = 0
   queue.length = 0 
   uiLog(`{yellow-fg}Queue cleared. No new bots will join. Online bots will stay.{/}`)
   updateUI()
@@ -627,7 +649,7 @@ async function toggleSteal(mode) {
   if (mode === 'on') {
     isStealMode = true
     uiLog(`{magenta-fg}[Steal] Mode ON. Pausing queue to scan server...{/}`)
-    stopJoin() // Pause current spawns so we can scan
+    stopJoin()
     customNames = await stealPlayerNames(targetHost, targetPort)
     if (customNames.length === 0) {
       uiLog('{red-fg}[Steal] Failed to read players. Use random names instead.{/}')
@@ -685,9 +707,9 @@ async function main() {
   try {
     const initialCount = await initialSetup()
     
-    initUI() // Start visual UI
+    initUI()
     
-    uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v9.0 ==={/}')
+    uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v9.1 ==={/}')
     uiLog('{magenta-fg}Credits: Smile B{/}')
     uiLog(`{green-fg}Auto-loaded ${proxyPool.length} SOCKS5 proxies.{/}`)
     uiLog('{cyan-fg}Proxies will auto-refresh every 60 seconds.{/}')
