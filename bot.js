@@ -1,3 +1,7 @@
+// === MINECRAFT SWARM AUTO-PROXY v8.0 ===
+// Credits: Smile B
+// GitHub: Smile-B14
+
 'use strict'
 
 const mineflayer = require('mineflayer')
@@ -51,7 +55,7 @@ process.on('unhandledRejection', (err) => uiLog(`{red-fg}CRASH PREVENTED: ${err}
 // --- BLESSED UI SETUP ---
 const screen = blessed.screen({
   smartCSR: true,
-  title: 'Minecraft Swarm v8.0',
+  title: 'Minecraft Swarm v8.0 | Smile B',
   fullUnicode: true,
   style: { fg: 'white', bg: 'black' }
 })
@@ -63,7 +67,7 @@ const header = blessed.box({
   border: { type: 'line' },
   style: { border: { fg: 'cyan' }, fg: 'white', bold: true },
   tags: true,
-  content: ' {cyan-fg}MINECRAFT SWARM v8.0{/} - Initializing...'
+  content: ' {cyan-fg}MINECRAFT SWARM v8.0{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
 })
 
 // Live Logs Box (Left)
@@ -115,7 +119,7 @@ function updateUI() {
     else if (s.connecting) connecting++
   }
   
-  header.setContent(` {cyan-fg}MINECRAFT SWARM v8.0{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Total: ${states.size} | Dead Proxies: ${deadProxiesGlobal.size}`)
+  header.setContent(` {cyan-fg}MINECRAFT SWARM v8.0{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Total: ${states.size} | Dead Proxies: ${deadProxiesGlobal.size}`)
   
   menuBox.setContent(
     `{cyan-fg}=== Settings ==={/}\n` +
@@ -565,19 +569,9 @@ function handleInput(input) {
   }
 }
 
-// --- PROMPT OVERRIDES FOR INITIAL SETUP ---
-const oldQuestion = (q) => new Promise(resolve => {
-  uiLog(q)
-  inputBox.once('submit', (text) => {
-    resolve(text.trim())
-    inputBox.clearValue()
-    inputBox.focus()
-    screen.render()
-  })
-})
-
 async function main() {
   uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v8.0 ==={/}')
+  uiLog('{magenta-fg}Credits: Smile B{/}')
   
   const fetched = await fetchProxies()
   proxyPool.push(...fetched)
