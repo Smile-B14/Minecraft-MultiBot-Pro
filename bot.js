@@ -1,4 +1,4 @@
-// === MINECRAFT SWARM AUTO-PROXY v9.1 ===
+// === MINECRAFT SWARM AUTO-PROXY v9.2 ===
 // Credits: Smile B
 // GitHub: Smile-B14
 
@@ -64,7 +64,7 @@ const setupRl = readline.createInterface({
 const ask = q => new Promise(resolve => setupRl.question(q, resolve))
 
 async function initialSetup() {
-  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v9.1 ===')
+  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v9.2 ===')
   console.log('Credits: Smile B\n')
   
   const stealMode = await ask('Enable Steal Player Mode initially? (y/n): ')
@@ -98,7 +98,7 @@ let inputBuffer = ''
 function initUI() {
   screen = blessed.screen({
     smartCSR: true,
-    title: 'Minecraft Swarm v9.1 | Smile B',
+    title: 'Minecraft Swarm v9.2 | Smile B',
     fullUnicode: true,
     style: { fg: 'white', bg: 'black' }
   })
@@ -109,7 +109,7 @@ function initUI() {
     border: { type: 'line' },
     style: { border: { fg: 'cyan' }, fg: 'white', bold: true },
     tags: true,
-    content: ' {cyan-fg}MINECRAFT SWARM v9.1{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
+    content: ' {cyan-fg}MINECRAFT SWARM v9.2{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
   })
 
   logBox = blessed.log({
@@ -133,7 +133,6 @@ function initUI() {
     label: ' Status & Commands '
   })
 
-  // Replaced buggy textbox with a static display to prevent double typing
   inputDisplay = blessed.box({
     parent: screen,
     bottom: 0, left: 0, width: '100%', height: 3,
@@ -143,7 +142,7 @@ function initUI() {
     content: ''
   })
 
-  // Manual keypress listener - 100% immune to double typing in Termux
+  // Custom keypress listener - 100% immune to double typing in Termux
   screen.on('keypress', (ch, key) => {
     if (key.full === 'return' || key.full === 'enter') {
       const cmd = inputBuffer.trim()
@@ -156,9 +155,12 @@ function initUI() {
       inputDisplay.setContent(inputBuffer)
       screen.render()
     } else if (ch && !key.ctrl && !key.meta && !key.full.startsWith('C-') && !key.full.startsWith('M-')) {
-      inputBuffer += ch
-      inputDisplay.setContent(inputBuffer)
-      screen.render()
+      // Prevent duplicate characters on multi-byte sequences
+      if (key.full === ch || key.full.length === 1) {
+        inputBuffer += ch
+        inputDisplay.setContent(inputBuffer)
+        screen.render()
+      }
     }
   })
 
@@ -186,7 +188,7 @@ function updateUI() {
     else if (s.connecting) connecting++
   }
   
-  header.setContent(` {cyan-fg}MINECRAFT SWARM v9.1{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Target: ${maintainCount === 0 ? 'INF' : maintainCount} | Dead Proxies: ${deadProxiesGlobal.size}`)
+  header.setContent(` {cyan-fg}MINECRAFT SWARM v9.2{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Target: ${maintainCount === 0 ? 'INF' : maintainCount} | Dead Proxies: ${deadProxiesGlobal.size}`)
   
   menuBox.setContent(
     `{cyan-fg}=== Settings ==={/}\n` +
@@ -504,12 +506,18 @@ function connectBot(state) {
   bot.on('kicked', reason => {
     const reasonStr = text(reason).toLowerCase()
     uiLog(`{red-fg}[${state.username}] KICKED: ${text(reason)}{/}`)
-    if (reasonStr.includes('whitelist') || reasonStr.includes('not whitelisted') || reasonStr.includes('banned')) {
-      uiLog(`{red-fg}[${state.username}] Stopping retries (Whitelist/Ban detected).{/}`)
+    
+    // FIXED IP BAN LOGIC
+    if (reasonStr.includes('banned_ip') || reasonStr.includes('ip_banned') || reasonStr.includes('ip banned')) {
+      // It's an IP ban. Ban the proxy, but keep the bot alive with a new proxy!
+      uiLog(`{yellow-fg}[${state.username}] IP Ban detected. Swapping proxy and retrying...{/}`)
+      banProxy(targetHost, state.proxy, 'IP Banned by Server')
+      state.proxy = getProxyForServer(targetHost) // Get new proxy
+      enqueue(state, 2000, 'ip ban proxy swap') // Retry same bot with new proxy
+    } else if (reasonStr.includes('whitelist') || reasonStr.includes('not whitelisted') || reasonStr.includes('banned')) {
+      // It's an account ban or whitelist. Stop trying with this username.
+      uiLog(`{red-fg}[${state.username}] Stopping retries (Account Ban/Whitelist detected).{/}`)
       state.permanentStop = true
-      if (reasonStr.includes('ip_banned') || reasonStr.includes('ip banned')) {
-        banProxy(targetHost, state.proxy, 'IP Banned by Server')
-      }
     }
   })
 
@@ -520,7 +528,7 @@ function connectBot(state) {
     }
     
     // Fallback Retry System: If error fires but 'end' doesn't, force requeue after 2s
-    state.connecting = false // Unblock so it can retry
+    state.connecting = false
     setTimeout(() => {
       if (!state.connected && !state.queued && !state.permanentStop) {
         uiLog(`{yellow-fg}[${state.username}] Connection stuck. Force retrying with new proxy...{/}`)
@@ -535,10 +543,12 @@ function connectBot(state) {
     state.connected = false
     state.connecting = false
     state.bot = null
-    if (!state.permanentStop) {
+    
+    // Only auto-requeue if it wasn't an IP ban (IP ban requeues in the 'kicked' event)
+    if (!state.permanentStop && !state.queued) {
       state.proxy = getProxyForServer(targetHost)
       enqueue(state, 3000, 'retry')
-    } else {
+    } else if (state.permanentStop) {
       states.delete(state.username.toLowerCase())
       botNames.delete(state.username.toLowerCase())
     }
@@ -709,7 +719,7 @@ async function main() {
     
     initUI()
     
-    uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v9.1 ==={/}')
+    uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v9.2 ==={/}')
     uiLog('{magenta-fg}Credits: Smile B{/}')
     uiLog(`{green-fg}Auto-loaded ${proxyPool.length} SOCKS5 proxies.{/}`)
     uiLog('{cyan-fg}Proxies will auto-refresh every 60 seconds.{/}')
