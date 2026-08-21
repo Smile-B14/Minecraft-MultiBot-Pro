@@ -1,10 +1,11 @@
-// === MINECRAFT SWARM AUTO-PROXY v8.0 ===
+// === MINECRAFT SWARM AUTO-PROXY v8.1 ===
 // Credits: Smile B
 // GitHub: Smile-B14
 
 'use strict'
 
 const mineflayer = require('mineflayer')
+const readline = require('readline')
 const { pathfinder, Movements, goals: { GoalFollow, GoalNearXZ } } = require('mineflayer-pathfinder')
 const { SocksProxyAgent } = require('socks-proxy-agent')
 const https = require('https')
@@ -34,6 +35,7 @@ let logsEnabled = false
 let spamTimer = null
 let infiniteSpawn = false
 let spawnInterval = null
+let isStealMode = false
 
 let targetHost = ''
 let targetPort = null
@@ -52,74 +54,126 @@ const text = v => typeof v === 'string' ? v : JSON.stringify(v)
 process.on('uncaughtException', (err) => uiLog(`{red-fg}CRASH PREVENTED: ${err.message}{/}`))
 process.on('unhandledRejection', (err) => uiLog(`{red-fg}CRASH PREVENTED: ${err}{/}`))
 
+// --- STANDARD READLINE FOR SETUP ---
+const setupRl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+})
+const ask = q => new Promise(resolve => setupRl.question(q, resolve))
+
+async function initialSetup() {
+  console.log('\n=== MINECRAFT SWARM AUTO-PROXY v8.1 ===')
+  console.log('Credits: Smile B\n')
+  
+  const stealMode = await ask('Enable Steal Player Mode initially? (y/n): ')
+  if (stealMode.trim().toLowerCase() === 'y') isStealMode = true
+
+  targetHost = (await ask('Target Server IP: ')).trim()
+  
+  const portText = (await ask('Port (blank = auto): ')).trim()
+  if (portText) targetPort = Number(portText)
+  
+  const versionText = (await ask('Version (blank = auto): ')).trim()
+  if (versionText && versionText.toLowerCase() !== 'auto') targetVersion = versionText
+
+  const countText = (await ask('How many bots to start with? (0 = infinite): ')).trim()
+  const count = parseInt(countText || '0')
+  
+  setupRl.close() // Close standard input to prevent double typing
+
+  // Fetch proxies before UI starts
+  console.log('Fetching public SOCKS5 proxies...')
+  const fetched = await fetchProxies()
+  proxyPool.push(...fetched)
+  console.log(`Auto-loaded ${proxyPool.length} SOCKS5 proxies.`)
+
+  return count
+}
+
 // --- BLESSED UI SETUP ---
-const screen = blessed.screen({
-  smartCSR: true,
-  title: 'Minecraft Swarm v8.0 | Smile B',
-  fullUnicode: true,
-  style: { fg: 'white', bg: 'black' }
-})
+let screen, header, logBox, menuBox, inputBox
 
-// Header
-const header = blessed.box({
-  parent: screen,
-  top: 0, left: 0, width: '100%', height: 3,
-  border: { type: 'line' },
-  style: { border: { fg: 'cyan' }, fg: 'white', bold: true },
-  tags: true,
-  content: ' {cyan-fg}MINECRAFT SWARM v8.0{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
-})
+function initUI() {
+  screen = blessed.screen({
+    smartCSR: true,
+    title: 'Minecraft Swarm v8.1 | Smile B',
+    fullUnicode: true,
+    style: { fg: 'white', bg: 'black' }
+  })
 
-// Live Logs Box (Left)
-const logBox = blessed.log({
-  parent: screen,
-  top: 3, left: 0, width: '70%', bottom: 3,
-  border: { type: 'line' },
-  style: { border: { fg: 'green' } },
-  tags: true,
-  scrollable: true,
-  alwaysScroll: true,
-  scrollbar: { ch: ' ', track: { bg: 'gray' }, style: { bg: 'cyan' } },
-  label: ' Live Logs '
-})
+  header = blessed.box({
+    parent: screen,
+    top: 0, left: 0, width: '100%', height: 3,
+    border: { type: 'line' },
+    style: { border: { fg: 'cyan' }, fg: 'white', bold: true },
+    tags: true,
+    content: ' {cyan-fg}MINECRAFT SWARM v8.1{/} | {magenta-fg}Credits: Smile B{/} - Initializing...'
+  })
 
-// Menu/Status Box (Right)
-const menuBox = blessed.box({
-  parent: screen,
-  top: 3, right: 0, width: '30%', bottom: 3,
-  border: { type: 'line' },
-  style: { border: { fg: 'magenta' } },
-  tags: true,
-  label: ' Status & Commands '
-})
+  logBox = blessed.log({
+    parent: screen,
+    top: 3, left: 0, width: '70%', bottom: 3,
+    border: { type: 'line' },
+    style: { border: { fg: 'green' } },
+    tags: true,
+    scrollable: true,
+    alwaysScroll: true,
+    scrollbar: { ch: ' ', track: { bg: 'gray' }, style: { bg: 'cyan' } },
+    label: ' Live Logs '
+  })
 
-// Input Box (Bottom)
-const inputBox = blessed.textbox({
-  parent: screen,
-  bottom: 0, left: 0, width: '100%', height: 3,
-  border: { type: 'line' },
-  style: { border: { fg: 'yellow' }, fg: 'white' },
-  label: ' Input (Type command & press Enter) ',
-  inputOnFocus: true
-})
+  menuBox = blessed.box({
+    parent: screen,
+    top: 3, right: 0, width: '30%', bottom: 3,
+    border: { type: 'line' },
+    style: { border: { fg: 'magenta' } },
+    tags: true,
+    label: ' Status & Commands '
+  })
+
+  inputBox = blessed.textbox({
+    parent: screen,
+    bottom: 0, left: 0, width: '100%', height: 3,
+    border: { type: 'line' },
+    style: { border: { fg: 'yellow' }, fg: 'white' },
+    label: ' Input (Type command & press Enter) ',
+    inputOnFocus: true,
+    keys: true
+  })
+
+  inputBox.on('submit', (text) => {
+    handleInput(text.trim())
+    inputBox.clearValue()
+    inputBox.focus()
+    screen.render()
+  })
+
+  inputBox.focus()
+  screen.render()
+}
 
 function uiLog(msg) {
   try {
-    logBox.log(msg)
-    screen.render()
+    if (logBox) {
+      logBox.log(msg)
+      screen.render()
+    } else {
+      console.log(msg.replace(/\{[^}]+\}/g, ''))
+    }
   } catch (e) {
     console.log(msg.replace(/\{[^}]+\}/g, ''))
   }
 }
 
 function updateUI() {
+  if (!screen) return
   let online = 0, connecting = 0
   for (const s of states.values()) {
     if (s.connected) online++
     else if (s.connecting) connecting++
   }
   
-  header.setContent(` {cyan-fg}MINECRAFT SWARM v8.0{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Total: ${states.size} | Dead Proxies: ${deadProxiesGlobal.size}`)
+  header.setContent(` {cyan-fg}MINECRAFT SWARM v8.1{/} | {magenta-fg}Credits: Smile B{/} | {green-fg}Online: ${online}{/} | {yellow-fg}Connecting: ${connecting}{/} | Total: ${states.size} | Dead Proxies: ${deadProxiesGlobal.size}`)
   
   menuBox.setContent(
     `{cyan-fg}=== Settings ==={/}\n` +
@@ -129,11 +183,13 @@ function updateUI() {
     ` Chat Logs: ${logsEnabled ? '{green-fg}ON{/}' : '{red-fg}OFF{/}'}\n` +
     ` Infinite Spawn: ${infiniteSpawn ? '{green-fg}ON{/}' : '{red-fg}OFF{/}'}\n` +
     ` Spam: ${spamTimer ? '{green-fg}ACTIVE{/}' : '{red-fg}OFF{/}'}\n` +
+    ` Steal Mode: ${isStealMode ? '{green-fg}ON{/}' : '{red-fg}OFF{/}'}\n` +
     `\n{magenta-fg}=== Commands ==={/}\n` +
     ` {bold}add <count>{/} (0 = inf)\n` +
     ` {bold}stopjoin{/} (halts queue)\n` +
     ` {bold}spam <ms> <msg>{/}\n` +
     ` {bold}stopspam{/}\n` +
+    ` {bold}steal on/off{/} (toggle)\n` +
     ` {bold}ai on/off{/}\n` +
     ` {bold}hit on/off{/}\n` +
     ` {bold}logs on/off{/}\n` +
@@ -142,19 +198,8 @@ function updateUI() {
   screen.render()
 }
 
-inputBox.on('submit', (text) => {
-  handleInput(text.trim())
-  inputBox.clearValue()
-  inputBox.focus()
-  screen.render()
-})
-
-inputBox.focus()
-screen.render()
-
 // --- PROXY & MINEFLAYER LOGIC ---
 async function fetchProxies() {
-  uiLog('{cyan-fg}Fetching public SOCKS5 proxies...{/}')
   return new Promise((resolve) => {
     https.get('https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all&ssl=all&anonymity=all', (res) => {
       let data = ''
@@ -226,9 +271,12 @@ async function stealPlayerNames(host, port) {
     const tempName = generateRealisticName()
     const opts = { host, username: tempName, auth: 'offline', hideErrors: true }
     if (port) opts.port = port
-    const bot = mineflayer.createBot(opts)
-    let resolved = false
     
+    let bot
+    try { bot = mineflayer.createBot(opts) }
+    catch (e) { resolve([]); return }
+    
+    let resolved = false
     const finish = () => {
       if (resolved) return
       resolved = true
@@ -532,6 +580,26 @@ function addBots(count) {
   }
 }
 
+async function toggleSteal(mode) {
+  if (mode === 'on') {
+    isStealMode = true
+    uiLog(`{magenta-fg}[Steal] Mode ON. Pausing queue to scan server...{/}`)
+    stopJoin() // Pause current spawns so we can scan
+    customNames = await stealPlayerNames(targetHost, targetPort)
+    if (customNames.length === 0) {
+      uiLog('{red-fg}[Steal] Failed to read players. Use random names instead.{/}')
+      isStealMode = false
+    } else {
+      uiLog(`{green-fg}[Steal] Successfully stole ${customNames.length} names! Type 'add 10' to spawn them.{/}`)
+    }
+  } else {
+    isStealMode = false
+    customNames = []
+    uiLog(`{magenta-fg}[Steal] Mode OFF. Future bots will use random names.{/}`)
+  }
+  updateUI()
+}
+
 function handleInput(input) {
   try {
     const space = input.indexOf(' ')
@@ -555,6 +623,7 @@ function handleInput(input) {
     else if (cmd === 'stopspam') stopSpam()
     else if (cmd === 'stopspawn') stopSpawn()
     else if (cmd === 'stopjoin') stopJoin()
+    else if (cmd === 'steal') toggleSteal(rest.toLowerCase())
     else if (cmd === 'ai') { aiEnabled = rest === 'on'; uiLog(`{yellow-fg}AI ${aiEnabled ? 'ON' : 'OFF'}{/}`); updateUI() }
     else if (cmd === 'hit') { hitEnabled = rest === 'on'; uiLog(`{yellow-fg}Hitting ${hitEnabled ? 'ON' : 'OFF'}{/}`); updateUI() }
     else if (cmd === 'logs') { logsEnabled = rest === 'on'; uiLog(`{yellow-fg}Logs ${logsEnabled ? 'ON' : 'OFF'}{/}`); updateUI() }
@@ -570,65 +639,33 @@ function handleInput(input) {
 }
 
 async function main() {
-  uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v8.0 ==={/}')
-  uiLog('{magenta-fg}Credits: Smile B{/}')
-  
-  const fetched = await fetchProxies()
-  proxyPool.push(...fetched)
-  uiLog(`{green-fg}Auto-loaded ${proxyPool.length} SOCKS5 proxies.{/}`)
-
-  uiLog('{cyan-fg}Enable Steal Player Mode? (y/n):{/}')
-  let stealMode = await new Promise(resolve => {
-    inputBox.once('submit', (text) => { resolve(text.trim().toLowerCase()); inputBox.clearValue(); inputBox.focus(); screen.render() })
-  })
-  
-  if (stealMode === 'y') {
-    uiLog('{cyan-fg}Enter Target Server IP (to steal names and rejoin):{/}')
-    targetHost = await new Promise(resolve => {
-      inputBox.once('submit', (text) => { resolve(text.trim()); inputBox.clearValue(); inputBox.focus(); screen.render() })
-    })
+  try {
+    const initialCount = await initialSetup()
     
-    uiLog('{cyan-fg}Enter Target Server Port (blank=auto):{/}')
-    let portText = await new Promise(resolve => {
-      inputBox.once('submit', (text) => { resolve(text.trim()); inputBox.clearValue(); inputBox.focus(); screen.render() })
-    })
-    if (portText) targetPort = Number(portText)
+    initUI() // Start visual UI
     
-    customNames = await stealPlayerNames(targetHost, targetPort)
-    if (customNames.length === 0) {
-      uiLog('{red-fg}Steal failed. Proceeding with normal random names.{/}')
-    } else {
-      uiLog(`{green-fg}Successfully stole ${customNames.length} names!{/}`)
+    uiLog('{cyan-fg}=== MINECRAFT SWARM AUTO-PROXY v8.1 ==={/}')
+    uiLog('{magenta-fg}Credits: Smile B{/}')
+    uiLog(`{green-fg}Auto-loaded ${proxyPool.length} SOCKS5 proxies.{/}`)
+    
+    if (isStealMode) {
+      uiLog('{magenta-fg}[Steal]{/} Scanning server for initial names...')
+      customNames = await stealPlayerNames(targetHost, targetPort)
+      if (customNames.length > 0) {
+        uiLog(`{green-fg}[Steal]{/} Stole ${customNames.length} names!{/}`)
+      } else {
+        uiLog('{red-fg}[Steal] Failed. Using random names.{/}')
+        isStealMode = false
+      }
     }
-  } else {
-    uiLog('{cyan-fg}Enter Target Server IP:{/}')
-    targetHost = await new Promise(resolve => {
-      inputBox.once('submit', (text) => { resolve(text.trim()); inputBox.clearValue(); inputBox.focus(); screen.render() })
-    })
     
-    uiLog('{cyan-fg}Enter Target Server Port (blank=auto):{/}')
-    let portText = await new Promise(resolve => {
-      inputBox.once('submit', (text) => { resolve(text.trim()); inputBox.clearValue(); inputBox.focus(); screen.render() })
-    })
-    if (portText) targetPort = Number(portText)
+    addBots(initialCount) 
+    uiLog(`{green-fg}Setup complete! Type commands in the input box below.{/}`)
+    updateUI()
+  } catch (err) {
+    console.error('Fatal startup error:', err)
+    process.exit(1)
   }
-
-  uiLog('{cyan-fg}Enter Version (blank=auto):{/}')
-  let versionText = await new Promise(resolve => {
-    inputBox.once('submit', (text) => { resolve(text.trim()); inputBox.clearValue(); inputBox.focus(); screen.render() })
-  })
-  if (versionText && versionText.toLowerCase() !== 'auto') targetVersion = versionText
-
-  uiLog('{cyan-fg}How many bots to start with? (0 = infinite):{/}')
-  let countText = await new Promise(resolve => {
-    inputBox.once('submit', (text) => { resolve(text.trim()); inputBox.clearValue(); inputBox.focus(); screen.render() })
-  })
-  
-  const count = parseInt(countText || '0')
-  addBots(count) 
-
-  uiLog(`{green-fg}Setup complete! Type commands in the input box below.{/}`)
-  updateUI()
 }
 
-main().catch(err => uiLog(`{red-fg}Fatal startup error: ${err}{/}`))
+main()
